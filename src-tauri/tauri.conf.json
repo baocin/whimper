@@ -1,0 +1,37 @@
+{
+  "productName": "Whimper",
+  "mainBinaryName": "whimper",
+  "version": "0.1.0",
+  "identifier": "com.whimper.app",
+  "build": {
+    "devUrl": "http://localhost:9174/",
+    "frontendDist": "../dist",
+    "beforeDevCommand": "bun run dev",
+    "beforeBuildCommand": "bun run build"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Whimper",
+        "width": 400,
+        "height": 300,
+        "resizable": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "capabilities": []
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "hardenedRuntime": true
+    }
+  },
+  "plugins": {}
+}

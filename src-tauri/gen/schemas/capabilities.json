@@ -1,0 +1,1 @@
+{"default-capability":{"identifier":"default-capability","description":"","local":true,"windows":["main","overlay"],"permissions":["core:default","core:event:allow-listen","core:event:allow-emit","global-shortcut:allow-register","global-shortcut:allow-unregister"]}}
