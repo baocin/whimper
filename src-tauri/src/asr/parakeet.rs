@@ -177,11 +177,29 @@ impl ParakeetAsr {
         let start = Instant::now();
 
         // Preprocessing: highpass → normalize → trim silence
+        let skip_preprocess = std::env::var("WHIMPER_SKIP_PREPROCESS").is_ok();
         let mut buf = samples.to_vec();
-        highpass_80hz(&mut buf);
-        peak_normalize(&mut buf);
 
-        let processed = if let Ok(mut vad_guard) = self.vad.lock() {
+        if skip_preprocess {
+            tracing::info!("WHIMPER_SKIP_PREPROCESS set — bypassing highpass/normalize/trim");
+        } else {
+            highpass_80hz(&mut buf);
+            peak_normalize(&mut buf);
+        }
+
+        let raw_peak = samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        let processed_peak = buf.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        tracing::info!(
+            "Audio stats: raw_len={} processed_len={} raw_peak={:.4} processed_peak={:.4}",
+            samples.len(),
+            buf.len(),
+            raw_peak,
+            processed_peak
+        );
+
+        let processed = if skip_preprocess {
+            &buf[..]
+        } else if let Ok(mut vad_guard) = self.vad.lock() {
             if vad_guard.is_loaded() {
                 let (trim_start, trim_end) = trim_silence(&buf, &mut vad_guard);
                 if trim_start >= trim_end {
@@ -404,17 +422,20 @@ impl ParakeetAsr {
             }
         }
 
-        let duration = max_dur_idx + 1;
+        let duration = if max_dur_idx == 0 { 1 } else { max_dur_idx };
 
         Ok((max_token_idx, duration))
     }
 
     fn tdt_greedy_decode(model: &mut TdtModel, encoder_out: &Array3<f32>) -> Result<Vec<usize>> {
         let enc_frames = encoder_out.shape()[2];
-        let mut hypothesis: Vec<i32> = Vec::new();
         let mut token_ids: Vec<usize> = Vec::new();
 
         let (mut states, mut slice_state) = Self::init_decoder_states();
+
+        // Initial decoder call with blank token
+        let (mut decoder_out, mut states_next, mut slice_next) =
+            Self::run_decoder(model, &[BLANK_ID as i32], states.clone(), slice_state.clone())?;
 
         let mut t = 0;
         let max_iterations = enc_frames * 10;
@@ -428,11 +449,7 @@ impl ParakeetAsr {
                 enc_frame[[0, i, 0]] = encoder_out[[0, i, t]];
             }
 
-            let (decoder_out, new_states, new_slice) =
-                Self::run_decoder(model, &hypothesis, states, slice_state)?;
-            states = new_states;
-            slice_state = new_slice;
-
+            // Use cached decoder output for joiner
             let dec_seq_len = decoder_out.shape()[2];
             let mut dec_frame = Array3::<f32>::zeros((1, DECODER_DIM, 1));
             for i in 0..DECODER_DIM {
@@ -442,8 +459,19 @@ impl ParakeetAsr {
             let (token_idx, duration) = Self::run_joiner(model, &enc_frame, &dec_frame)?;
 
             if token_idx != BLANK_ID {
-                hypothesis.push(token_idx as i32);
                 token_ids.push(token_idx);
+                // Accept pending states, then run decoder with new token only
+                states = states_next;
+                slice_state = slice_next;
+                let result = Self::run_decoder(
+                    model,
+                    &[token_idx as i32],
+                    states.clone(),
+                    slice_state.clone(),
+                )?;
+                decoder_out = result.0;
+                states_next = result.1;
+                slice_next = result.2;
             }
 
             t += duration;

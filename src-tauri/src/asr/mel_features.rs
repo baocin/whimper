@@ -32,7 +32,7 @@ impl MelSpectrogramConfig {
             mel_min_hz: 0.0,
             mel_max_hz: 8_000.0,
             preemphasis: 0.97,
-            log_epsilon: 1e-10,
+            log_epsilon: 5.960_464_477_539_063e-8, // 2^-24, matches NeMo
         }
     }
 }
@@ -129,7 +129,7 @@ fn hann_window(length: usize) -> Vec<f32> {
     (0..length)
         .map(|i| {
             0.5 - 0.5
-                * (2.0 * std::f32::consts::PI * i as f32 / length.saturating_sub(1) as f32).cos()
+                * (2.0 * std::f32::consts::PI * i as f32 / length as f32).cos()
         })
         .collect()
 }
@@ -198,6 +198,17 @@ fn build_mel_filterbank(
             }
         }
 
+        // Slaney normalization: normalize each filter by its bandwidth in Hz
+        // so narrow low-frequency and wide high-frequency filters contribute equally.
+        // This matches librosa.filters.mel(norm='slaney') used by NeMo during training.
+        let bandwidth = hz_points[i + 2] - hz_points[i];
+        if bandwidth > 0.0 {
+            let norm = 2.0 / bandwidth;
+            for val in filter.iter_mut() {
+                *val *= norm;
+            }
+        }
+
         filters.push(filter);
     }
 
@@ -223,7 +234,7 @@ fn normalize_per_band(features: &mut Array2<f32>) {
             variance += diff * diff;
         }
         variance /= num_frames as f32;
-        let std = variance.sqrt().max(1e-6);
+        let std = variance.sqrt() + 1e-5;
 
         for frame in 0..num_frames {
             features[(frame, mel)] = (features[(frame, mel)] - mean) / std;
