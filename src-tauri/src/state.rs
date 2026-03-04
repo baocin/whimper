@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::asr::ParakeetAsr;
-use crate::audio::pipeline::PipelineHandle;
+use crate::audio::pipeline::{PipelineHandle, PreRollBuffer};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
@@ -41,6 +41,10 @@ pub struct AppState {
     pub previous_app_pid: Mutex<Option<i32>>,
     /// Active audio pipeline — held here so it doesn't get dropped while recording
     pub mic_stream: std::sync::Mutex<Option<PipelineHandle>>,
+    /// Pre-roll ring buffer: holds last 300ms of background mic audio
+    pub preroll_buffer: Arc<PreRollBuffer>,
+    /// Handle to the background pre-roll mic stream
+    pub preroll_mic: std::sync::Mutex<Option<PipelineHandle>>,
 }
 
 impl AppState {
@@ -52,6 +56,8 @@ impl AppState {
             cancel_download: AtomicBool::new(false),
             previous_app_pid: Mutex::new(None),
             mic_stream: std::sync::Mutex::new(None),
+            preroll_buffer: Arc::new(PreRollBuffer::new()),
+            preroll_mic: std::sync::Mutex::new(None),
         }
     }
 

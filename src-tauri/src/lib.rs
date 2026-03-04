@@ -73,6 +73,10 @@ async fn load_model(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String
     .map_err(|e: String| e)?;
 
     *state.model_status.lock().await = ModelStatus::Ready;
+
+    // Start background pre-roll mic
+    start_preroll_mic(&state);
+
     Ok(())
 }
 
@@ -96,6 +100,9 @@ async fn cancel_recording(
         if let Some(window) = app_handle.get_webview_window("overlay") {
             let _ = window.close();
         }
+
+        // Restart pre-roll mic
+        start_preroll_mic(&state);
     }
     Ok(())
 }
@@ -106,6 +113,23 @@ async fn hide_main_window(app_handle: AppHandle) -> Result<(), String> {
         window.hide().map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+// ── Pre-roll Mic ─────────────────────────────────────────────────────────
+
+/// Start (or restart) the background pre-roll mic that fills the ring buffer.
+fn start_preroll_mic(state: &Arc<AppState>) {
+    let buffer = Arc::clone(&state.preroll_buffer);
+    match audio::pipeline::start_preroll(buffer) {
+        Ok(handle) => {
+            if let Ok(mut guard) = state.preroll_mic.lock() {
+                *guard = Some(handle);
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to start pre-roll mic: {}", e);
+        }
+    }
 }
 
 // ── Global Hotkey Handler ────────────────────────────────────────────────
@@ -168,8 +192,16 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                     let _ = paste::activate_app(pid);
                 }
 
-                // Start audio pipeline (record-only, no ASR/VAD needed)
-                match audio::pipeline::start_pipeline() {
+                // Stop pre-roll mic before starting recording (avoid two mic streams)
+                if let Ok(mut guard) = state.preroll_mic.lock() {
+                    if let Some(handle) = guard.take() {
+                        handle.stop_mic();
+                        tracing::info!("Pre-roll mic stopped for recording");
+                    }
+                }
+
+                // Start audio pipeline with pre-roll audio prepended
+                match audio::pipeline::start_pipeline(Some(&state.preroll_buffer)) {
                     Ok(handle) => {
                         if let Ok(mut guard) = state.mic_stream.lock() {
                             *guard = Some(handle);
@@ -196,6 +228,9 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                     audio_samples.len(),
                     audio_samples.len() as f64 / 16000.0
                 );
+
+                // Restart pre-roll mic now that recording is done
+                start_preroll_mic(&state);
 
                 let _ = app.emit("recording-state", "processing");
 
@@ -318,6 +353,9 @@ pub fn run() {
                             *state_for_load.model_status.lock().await = ModelStatus::Ready;
                             let _ = app_handle2.emit("model-ready", ());
                             tracing::info!("Parakeet TDT model auto-loaded successfully");
+
+                            // Start background pre-roll mic
+                            start_preroll_mic(&state_for_load);
                         }
                         Ok(Err(e)) => {
                             tracing::error!("Failed to auto-load model: {}", e);
