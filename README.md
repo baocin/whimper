@@ -2,6 +2,8 @@
 
 Local, privacy-first voice-to-text transcription for macOS. An open-source alternative to SuperWhisper that runs entirely on-device.
 
+Seriously got tired of not owning the software that most of my thoughts were streaming through.
+
 ## How it works
 
 1. **First launch** — downloads the Parakeet TDT 0.6B ASR model (~662 MB) to `~/.whimper/models/`
