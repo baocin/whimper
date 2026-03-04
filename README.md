@@ -4,7 +4,7 @@ Local, privacy-first voice-to-text transcription for macOS. An open-source alter
 
 ## How it works
 
-1. **First launch** — downloads the Parakeet TDT 0.6B ASR model (~250 MB) to `~/.whimper/models/`
+1. **First launch** — downloads the Parakeet TDT 0.6B ASR model (~662 MB) to `~/.whimper/models/`
 2. **Background** — the app hides after model load, a pre-roll mic keeps a 300ms audio buffer ready
 3. **Option+Space** — starts recording with a translucent overlay; pre-roll captures the start of your speech
 4. **Option+Space again** — stops recording, transcribes, and pastes the text into the previously focused app

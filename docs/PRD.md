@@ -11,7 +11,7 @@ SuperWhisper is paid and closed-source. Users who want fast, accurate, local dic
 ## Solution
 
 A lightweight Tauri 2 app (Rust + React) that:
-1. Downloads the Parakeet TDT 0.6B ONNX model (~250 MB) on first launch
+1. Downloads the Parakeet TDT 0.6B ONNX model (~662 MB) on first launch
 2. Runs the model locally via ONNX Runtime
 3. Listens for a global hotkey (Option+Space) to start/stop dictation
 4. Shows a minimal translucent overlay while recording
@@ -29,7 +29,7 @@ A lightweight Tauri 2 app (Rust + React) that:
 ## Functional Requirements
 
 ### FR-1: Model Management
-- Download NVIDIA Parakeet TDT 0.6B ONNX model (~250 MB) on first launch
+- Download NVIDIA Parakeet TDT 0.6B ONNX model (~662 MB) on first launch
 - Show download progress with percentage, speed, and ETA
 - Support HTTP Range headers for download resume
 - Store models in `~/.whimper/models/parakeet-tdt/`
@@ -74,7 +74,7 @@ A lightweight Tauri 2 app (Rust + React) that:
 
 - **Privacy**: All processing is local. No network calls after model download.
 - **Performance**: Transcription completes within seconds of recording stop. Model load ≤ 5s on Apple Silicon.
-- **Storage**: ~250 MB for model files in `~/.whimper/`
+- **Storage**: ~662 MB for model files in `~/.whimper/`
 - **Platform**: macOS only (Apple Silicon + Intel with Metal/wgpu support)
 - **Accessibility**: Prompt user for microphone and accessibility permissions on first use
 
