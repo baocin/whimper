@@ -115,6 +115,11 @@ impl SileroVad {
         Ok(data.first().copied().unwrap_or(0.0))
     }
 
+    /// Process a single 512-sample chunk and return true if speech probability exceeds threshold.
+    pub fn process_chunk_threshold(&mut self, samples: &[f32]) -> bool {
+        self.process_chunk(samples).unwrap_or(0.0) >= THRESHOLD
+    }
+
     /// Real-time speech detection for audio buffers.
     ///
     /// Runs Silero VAD on 512-sample chunks, returns true if any chunk

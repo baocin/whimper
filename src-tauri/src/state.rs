@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::asr::{SileroVad, VoxtralAsr};
+use crate::asr::ParakeetAsr;
 use crate::audio::pipeline::PipelineHandle;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,8 +35,7 @@ pub enum RecordingState {
 pub struct AppState {
     pub model_status: Mutex<ModelStatus>,
     pub recording_state: Mutex<RecordingState>,
-    pub asr: Arc<std::sync::Mutex<Option<VoxtralAsr>>>,
-    pub vad: Arc<std::sync::Mutex<Option<SileroVad>>>,
+    pub asr: Arc<std::sync::Mutex<Option<ParakeetAsr>>>,
     pub cancel_download: AtomicBool,
     /// PID of the app that was frontmost before we opened the overlay
     pub previous_app_pid: Mutex<Option<i32>>,
@@ -50,7 +49,6 @@ impl AppState {
             model_status: Mutex::new(ModelStatus::NotDownloaded),
             recording_state: Mutex::new(RecordingState::Idle),
             asr: Arc::new(std::sync::Mutex::new(None)),
-            vad: Arc::new(std::sync::Mutex::new(None)),
             cancel_download: AtomicBool::new(false),
             previous_app_pid: Mutex::new(None),
             mic_stream: std::sync::Mutex::new(None),
@@ -66,10 +64,10 @@ impl AppState {
     }
 }
 
-/// Return the model directory path: ~/.whimper/models/voxtral-mini-4b/
+/// Return the model directory path: ~/.whimper/models/parakeet-tdt/
 pub fn model_dir() -> std::path::PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    home.join(".whimper").join("models").join("voxtral-mini-4b")
+    home.join(".whimper").join("models").join("parakeet-tdt")
 }
 
 #[cfg(test)]
@@ -90,7 +88,7 @@ mod tests {
     #[test]
     fn test_model_dir_path() {
         let dir = model_dir();
-        assert!(dir.ends_with(".whimper/models/voxtral-mini-4b"));
+        assert!(dir.ends_with(".whimper/models/parakeet-tdt"));
     }
 
     #[test]

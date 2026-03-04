@@ -1,5 +1,6 @@
+mod mel_features;
+mod parakeet;
+mod preprocess;
 mod vad;
-mod voxtral;
 
-pub use vad::SileroVad;
-pub use voxtral::VoxtralAsr;
+pub use parakeet::ParakeetAsr;

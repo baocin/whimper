@@ -1,7 +1,7 @@
-//! Model download with R2 CDN primary and HuggingFace fallback
+//! Model download with R2 CDN
 //!
-//! Downloads voxtral-q4.gguf (~2.51 GB) and tekken.json (~14.9 MB)
-//! to ~/.whimper/models/voxtral-mini-4b/
+//! Downloads Parakeet TDT INT8 model files (~662 MB total)
+//! to ~/.whimper/models/parakeet-tdt/
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
@@ -11,12 +11,13 @@ use tokio::io::AsyncWriteExt;
 
 use crate::state;
 
-const R2_BASE: &str = "https://public.mydatatimeline.com/models/voxtral-mini-4b";
-const HF_BASE: &str = "https://huggingface.co/TrevorJS/voxtral-mini-realtime-gguf/resolve/main";
+const R2_BASE: &str = "https://public.mydatatimeline.com/models/parakeet-tdt-int8";
 
 const MODEL_FILES: &[(&str, u64)] = &[
-    ("voxtral-q4.gguf", 2_510_000_000), // ~2.51 GB
-    ("tekken.json", 14_900_000),          // ~14.9 MB
+    ("encoder.int8.onnx", 652_000_000), // ~652 MB
+    ("decoder.int8.onnx", 8_000_000),   // ~8 MB
+    ("joiner.int8.onnx", 2_000_000),    // ~2 MB
+    ("tokens.txt", 10_000),             // ~10 KB
 ];
 
 #[derive(Clone, serde::Serialize)]
@@ -58,37 +59,20 @@ pub async fn download_model(app_handle: AppHandle, state: &state::AppState) -> R
             }
         }
 
-        // Try R2 first, fall back to HuggingFace
-        let r2_url = format!("{}/{}", R2_BASE, filename);
-        let hf_url = format!("{}/{}", HF_BASE, filename);
+        let url = format!("{}/{}", R2_BASE, filename);
 
-        let result = download_file(
+        download_file(
             &client,
-            &r2_url,
+            &url,
             &dest,
             &app_handle,
             state,
             downloaded_total,
             total_bytes,
         )
-        .await;
+        .await
+        .context(format!("Failed to download {}", filename))?;
 
-        if result.is_err() {
-            tracing::warn!("R2 download failed for {}, trying HuggingFace", filename);
-            download_file(
-                &client,
-                &hf_url,
-                &dest,
-                &app_handle,
-                state,
-                downloaded_total,
-                total_bytes,
-            )
-            .await
-            .context(format!("Failed to download {} from both sources", filename))?;
-        }
-
-        // Update total downloaded
         let metadata = tokio::fs::metadata(&dest).await?;
         downloaded_total += metadata.len();
     }
@@ -108,7 +92,6 @@ async fn download_file(
 ) -> Result<()> {
     tracing::info!("Downloading {} → {:?}", url, dest);
 
-    // Check for partial download (resume support)
     let mut file_downloaded: u64 = 0;
     let tmp_path = dest.with_extension("part");
 
@@ -122,7 +105,6 @@ async fn download_file(
     }
 
     let response = request.send().await?.error_for_status()?;
-    let _content_length = response.content_length().unwrap_or(0);
 
     let mut file = if file_downloaded > 0 {
         tokio::fs::OpenOptions::new()
@@ -148,7 +130,6 @@ async fn download_file(
         file.write_all(&chunk).await?;
         chunk_downloaded += chunk.len() as u64;
 
-        // Emit progress at most 10 times per second
         if last_emit.elapsed().as_millis() >= 100 {
             let elapsed = start.elapsed().as_secs_f64();
             let speed_mbps = if elapsed > 0.0 {
@@ -172,7 +153,6 @@ async fn download_file(
     file.flush().await?;
     drop(file);
 
-    // Move from .part to final destination
     tokio::fs::rename(&tmp_path, dest).await?;
 
     Ok(())
@@ -184,15 +164,13 @@ mod tests {
 
     #[test]
     fn test_model_files_defined() {
-        assert_eq!(MODEL_FILES.len(), 2);
-        assert_eq!(MODEL_FILES[0].0, "voxtral-q4.gguf");
-        assert_eq!(MODEL_FILES[1].0, "tekken.json");
+        assert_eq!(MODEL_FILES.len(), 4);
+        assert_eq!(MODEL_FILES[0].0, "encoder.int8.onnx");
+        assert_eq!(MODEL_FILES[3].0, "tokens.txt");
     }
 
     #[test]
     fn test_is_model_downloaded_false() {
-        // Model shouldn't be downloaded in test environment
-        // (unless running on a dev machine that has it)
         let dir = state::model_dir();
         if !dir.exists() {
             assert!(!is_model_downloaded());

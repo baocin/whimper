@@ -1,4 +1,3 @@
-import { invoke } from '@tauri-apps/api/core';
 import { useDownload } from '../hooks/useDownload';
 import type { ModelStatus } from '../types';
 
@@ -21,7 +20,7 @@ export default function DownloadScreen({ modelStatus, onStatusChange }: Props) {
       {modelStatus.kind === 'not_downloaded' && (
         <div className="text-center">
           <p className="mb-4 text-gray-300">
-            Voxtral-Mini-4B model required (~2.5 GB download)
+            Parakeet speech model required (~662 MB download)
           </p>
           <button
             onClick={startDownload}
@@ -62,7 +61,7 @@ export default function DownloadScreen({ modelStatus, onStatusChange }: Props) {
 
       {modelStatus.kind === 'loading' && (
         <div className="text-center">
-          <p className="text-gray-300 mb-4">Loading model on GPU...</p>
+          <p className="text-gray-300 mb-4">Loading model...</p>
           <div className="animate-spin w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full mx-auto" />
         </div>
       )}

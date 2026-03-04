@@ -9,14 +9,13 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
-// ── Tauri Commands ────────────────────────────────────────────────────────
+// ─��� Tauri Commands ────────────────────────────────────────────────────────
 
 #[tauri::command]
 async fn check_model_status(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<ModelStatus, String> {
     if download::is_model_downloaded() {
-        // Check if model is already loaded
         if let Ok(guard) = state.asr.lock() {
             if guard.is_some() {
                 return Ok(ModelStatus::Ready);
@@ -61,9 +60,8 @@ async fn load_model(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String
 
     let asr_arc = state.asr.clone();
 
-    // Load model on a blocking thread (GPU initialization)
     tokio::task::spawn_blocking(move || {
-        let asr = asr::VoxtralAsr::new();
+        let asr = asr::ParakeetAsr::new();
         asr.load_model(&dir_str).map_err(|e| e.to_string())?;
         if let Ok(mut guard) = asr_arc.lock() {
             *guard = Some(asr);
@@ -87,25 +85,10 @@ async fn cancel_recording(
     if *recording == RecordingState::Listening {
         *recording = RecordingState::Idle;
 
-        // Stop mic stream and drop pipeline (don't process tail audio on cancel)
+        // Stop mic stream (don't process audio on cancel)
         if let Ok(mut guard) = state.mic_stream.lock() {
             if let Some(handle) = guard.take() {
                 handle.stop_mic();
-                // Drop handle — tx drops, processing thread exits
-            }
-        }
-
-        // Reset ASR state
-        if let Ok(guard) = state.asr.lock() {
-            if let Some(ref asr) = *guard {
-                asr.reset();
-            }
-        }
-
-        // Reset VAD LSTM state
-        if let Ok(mut guard) = state.vad.lock() {
-            if let Some(ref mut vad) = *guard {
-                vad.reset_state();
             }
         }
 
@@ -151,7 +134,7 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
 
                 *recording = RecordingState::Listening;
                 tracing::info!("Recording started");
-                drop(recording); // Release lock before window operations
+                drop(recording);
 
                 // Create overlay window
                 let overlay = tauri::WebviewWindowBuilder::new(
@@ -169,7 +152,6 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                 .build();
 
                 if let Ok(window) = overlay {
-                    // Position at top-center
                     if let Ok(monitor) = window.current_monitor() {
                         if let Some(m) = monitor {
                             let screen_width: f64 = m.size().width as f64;
@@ -181,10 +163,8 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                     }
                 }
 
-                // Start audio pipeline and store the PipelineHandle so it stays alive
-                let asr = state.asr.clone();
-                let vad = state.vad.clone();
-                match audio::pipeline::start_pipeline(app.clone(), asr, vad) {
+                // Start audio pipeline (record-only, no ASR/VAD needed)
+                match audio::pipeline::start_pipeline() {
                     Ok(handle) => {
                         if let Ok(mut guard) = state.mic_stream.lock() {
                             *guard = Some(handle);
@@ -199,21 +179,64 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                 *recording = RecordingState::Idle;
                 drop(recording);
 
-                // Finalize pipeline: flush tail audio, get transcript, shut down
-                let transcript = if let Ok(mut guard) = state.mic_stream.lock() {
+                // Finalize pipeline: stop mic, get audio buffer
+                let audio_samples = if let Ok(mut guard) = state.mic_stream.lock() {
                     guard.take().map(|h| h.finalize()).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+
+                tracing::info!(
+                    "Recording stopped, {} samples ({:.1}s)",
+                    audio_samples.len(),
+                    audio_samples.len() as f64 / 16000.0
+                );
+
+                let _ = app.emit("recording-state", "processing");
+
+                // Batch-transcribe on blocking thread
+                let asr_arc = state.asr.clone();
+                let transcript = if !audio_samples.is_empty() {
+                    match tokio::task::spawn_blocking(move || {
+                        let guard = asr_arc.lock().map_err(|e| format!("ASR lock: {}", e))?;
+                        let asr = guard
+                            .as_ref()
+                            .ok_or_else(|| "Model not loaded".to_string())?;
+                        asr.transcribe(&audio_samples)
+                            .map(|r| r.text)
+                            .map_err(|e| e.to_string())
+                    })
+                    .await
+                    {
+                        Ok(Ok(text)) => text,
+                        Ok(Err(e)) => {
+                            tracing::error!("Transcription failed: {}", e);
+                            String::new()
+                        }
+                        Err(e) => {
+                            tracing::error!("Transcription task panicked: {}", e);
+                            String::new()
+                        }
+                    }
                 } else {
                     String::new()
                 };
-                tracing::info!("Recording stopped, transcript ({} chars): {:?}", transcript.len(), &transcript[..transcript.len().min(120)]);
+
+                tracing::info!(
+                    "Transcript ({} chars): {:?}",
+                    transcript.len(),
+                    &transcript[..transcript.len().min(120)]
+                );
 
                 // Close overlay
                 if let Some(window) = app.get_webview_window("overlay") {
                     let _ = window.close();
                 }
 
-                // Paste if we have text
-                if !transcript.trim().is_empty() {
+                // Paste if we have text (and it's not a hallucination)
+                if !transcript.trim().is_empty()
+                    && !asr::ParakeetAsr::is_hallucination(&transcript)
+                {
                     let prev_pid = *state.previous_app_pid.lock().await;
 
                     // Small delay for overlay to close
@@ -276,7 +299,7 @@ pub fn run() {
                     let asr_arc = state_for_load.asr.clone();
 
                     let result = tokio::task::spawn_blocking(move || {
-                        let asr = asr::VoxtralAsr::new();
+                        let asr = asr::ParakeetAsr::new();
                         asr.load_model(&dir_str)?;
                         Ok::<_, anyhow::Error>(asr)
                     })
@@ -289,30 +312,7 @@ pub fn run() {
                             }
                             *state_for_load.model_status.lock().await = ModelStatus::Ready;
                             let _ = app_handle2.emit("model-ready", ());
-                            tracing::info!("Model auto-loaded successfully");
-
-                            // Load VAD model
-                            let vad_arc = state_for_load.vad.clone();
-                            match tokio::task::spawn_blocking(move || {
-                                let mut vad = asr::SileroVad::new();
-                                vad.load_embedded()?;
-                                Ok::<_, anyhow::Error>(vad)
-                            })
-                            .await
-                            {
-                                Ok(Ok(vad)) => {
-                                    if let Ok(mut guard) = vad_arc.lock() {
-                                        *guard = Some(vad);
-                                    }
-                                    tracing::info!("VAD model auto-loaded successfully");
-                                }
-                                Ok(Err(e)) => {
-                                    tracing::error!("Failed to load VAD model: {}", e);
-                                }
-                                Err(e) => {
-                                    tracing::error!("VAD loading task panicked: {}", e);
-                                }
-                            }
+                            tracing::info!("Parakeet TDT model auto-loaded successfully");
                         }
                         Ok(Err(e)) => {
                             tracing::error!("Failed to auto-load model: {}", e);
@@ -340,7 +340,6 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(conf_str)
             .expect("tauri.conf.json is not valid JSON");
 
-        // Verify required top-level keys exist
         assert!(parsed.get("productName").is_some(), "missing productName");
         assert!(parsed.get("identifier").is_some(), "missing identifier");
         assert!(parsed.get("app").is_some(), "missing app");
@@ -348,8 +347,6 @@ mod tests {
 
     #[test]
     fn test_plugins_config_has_no_unit_type_violations() {
-        // tauri-plugin-global-shortcut expects unit config (no object).
-        // If "global-shortcut" appears in plugins, it must be null, not {}.
         let conf_str = include_str!("../tauri.conf.json");
         let parsed: serde_json::Value = serde_json::from_str(conf_str).unwrap();
 
@@ -368,7 +365,6 @@ mod tests {
     fn test_app_state_initial_values() {
         let state = AppState::new();
         assert!(!state.is_download_cancelled());
-        // Model should not be loaded initially
         assert!(state.asr.lock().unwrap().is_none());
     }
 }
