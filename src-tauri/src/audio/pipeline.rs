@@ -29,6 +29,8 @@ impl PipelineHandle {
     /// Stop mic and return the accumulated audio buffer (16kHz mono f32).
     pub fn finalize(self) -> Vec<f32> {
         self.mic_stream.stop();
+        // Flush remaining resampler samples before draining the accumulator
+        self.mic_stream.flush_resampler();
         self.accumulator
             .lock()
             .map(|mut acc| acc.drain(..).collect())

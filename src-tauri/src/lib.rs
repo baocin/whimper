@@ -163,6 +163,11 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                     }
                 }
 
+                // Re-activate previous app so overlay doesn't steal keyboard focus
+                if let Some(pid) = *state.previous_app_pid.lock().await {
+                    let _ = paste::activate_app(pid);
+                }
+
                 // Start audio pipeline (record-only, no ASR/VAD needed)
                 match audio::pipeline::start_pipeline() {
                     Ok(handle) => {

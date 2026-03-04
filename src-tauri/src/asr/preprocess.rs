@@ -25,15 +25,17 @@ pub fn highpass_80hz(samples: &mut [f32]) {
 }
 
 /// Scale buffer so max |sample| = 0.95.
-/// Skips if peak already > 0.1 (signal is fine) or < 0.001 (silent).
+/// Skips silence (peak < 0.001). Does not attenuate already-loud signals.
 pub fn peak_normalize(samples: &mut [f32]) {
     let peak = samples.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
-    if peak < 0.001 || peak > 0.1 {
-        return;
+    if peak < 0.001 {
+        return; // silence, don't amplify noise
     }
     let gain = 0.95 / peak;
-    for s in samples.iter_mut() {
-        *s *= gain;
+    if gain > 1.0 {
+        for s in samples.iter_mut() {
+            *s *= gain;
+        }
     }
 }
 
@@ -103,8 +105,16 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_skips_loud_signal() {
+    fn test_normalize_amplifies_moderate_signal() {
         let mut buf = vec![0.5f32; 100];
+        peak_normalize(&mut buf);
+        let peak = buf.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+        assert!((peak - 0.95).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_normalize_skips_loud_signal() {
+        let mut buf = vec![1.0f32; 100];
         let original = buf.clone();
         peak_normalize(&mut buf);
         assert_eq!(buf, original);

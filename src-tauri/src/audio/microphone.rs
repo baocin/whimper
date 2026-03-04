@@ -19,6 +19,9 @@ pub type AudioChunkCallback = Box<dyn Fn(&[f32]) + Send + Sync>;
 pub struct MicStream {
     _stream: cpal::Stream,
     is_active: Arc<AtomicBool>,
+    resampler: Option<Arc<Mutex<rubato::FftFixedIn<f32>>>>,
+    resampler_accumulator: Arc<Mutex<Vec<f32>>>,
+    on_chunk: Arc<AudioChunkCallback>,
 }
 
 // Safety: cpal::Stream is not Send by default, but on macOS (CoreAudio) the underlying
@@ -30,6 +33,50 @@ impl MicStream {
     /// Stop the microphone stream
     pub fn stop(&self) {
         self.is_active.store(false, Ordering::SeqCst);
+    }
+
+    /// Flush remaining samples in the resampler accumulator.
+    /// Zero-pads to a full chunk, processes through the resampler,
+    /// and delivers the proportional output via callback.
+    pub fn flush_resampler(&self) {
+        let Some(ref rs) = self.resampler else {
+            return;
+        };
+
+        let mut acc = match self.resampler_accumulator.lock() {
+            Ok(guard) => guard,
+            Err(_) => return,
+        };
+
+        let remaining = acc.len();
+        if remaining == 0 {
+            return;
+        }
+
+        // Zero-pad to full chunk size
+        acc.resize(RESAMPLER_CHUNK_SIZE, 0.0);
+        let chunk: Vec<f32> = acc.drain(..).collect();
+        let input = vec![chunk];
+
+        if let Ok(mut guard) = rs.lock() {
+            if let Ok(output) = guard.process(&input, None) {
+                if let Some(resampled) = output.into_iter().next() {
+                    // Deliver proportional output (not the zero-padded tail)
+                    let ratio = guard.output_frames_max() as f64 / guard.input_frames_max() as f64;
+                    let valid_samples =
+                        (remaining as f64 * ratio).ceil() as usize;
+                    let valid = valid_samples.min(resampled.len());
+                    if valid > 0 {
+                        tracing::debug!(
+                            "Flushed resampler: {} remaining samples -> {} output samples",
+                            remaining,
+                            valid
+                        );
+                        (self.on_chunk)(&resampled[..valid]);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -128,6 +175,9 @@ pub fn start_capture(on_chunk: AudioChunkCallback) -> Result<MicStream> {
     Ok(MicStream {
         _stream: stream,
         is_active,
+        resampler,
+        resampler_accumulator: accumulator,
+        on_chunk,
     })
 }
 
