@@ -33,6 +33,40 @@ All speech processing happens locally via ONNX Runtime. No network calls after t
 | Hotkey | tauri-plugin-global-shortcut |
 | Paste | cocoa + objc + core-graphics (NSPasteboard + CGEvent) |
 
+## Making Parakeet TDT work
+
+Getting good transcription from the base Parakeet TDT 0.6B ONNX model required several non-obvious fixes. Here's what mattered.
+
+### Audio preprocessing (`src-tauri/src/asr/preprocess.rs`)
+
+- **80Hz Butterworth high-pass filter** — removes desk vibration, AC hum, and other low-frequency noise before feature extraction
+- **Peak normalization** — amplifies quiet signals to 0.95 peak; skips near-silence (peak < 0.001) to avoid amplifying noise
+- **Silence trimming via Silero VAD** — trims leading/trailing silence using 512-sample chunks with 20ms padding to preserve word boundaries
+
+### Mel spectrogram features (`src-tauri/src/asr/mel_features.rs`)
+
+- 0.97 preemphasis, 25ms Hann window, 10ms hop, 512-pt FFT, 128 mel bins
+- **Slaney-normalized mel filterbank** — this is critical; must match the NeMo training pipeline exactly or accuracy degrades significantly
+- **Log energy with ε = 2⁻²⁴** — matches NeMo's epsilon for numerical stability
+- Per-band mean-variance normalization
+
+### TDT decoder fixes (`src-tauri/src/asr/parakeet.rs`)
+
+- **Cache decoder output** — only call the decoder on non-blank token emission, not every frame (massive speedup)
+- **Single-token decoder input** — pass only the last emitted token to the decoder, not the full hypothesis
+- **Duration off-by-one fix** — `max(argmax, 1)` prevents zero-frame skips that cause the decode loop to stall
+
+### Audio capture (`src-tauri/src/audio/`)
+
+- **FFT-based resampling** to 16kHz via rubato
+- **Resampler flush on stop** — zero-pads the final chunk and proportionally trims output so trailing audio isn't lost
+- **300ms pre-roll ring buffer** — continuously captures mic input so speech before the hotkey press isn't clipped
+
+### Hallucination filtering (`src-tauri/src/asr/parakeet.rs`)
+
+- Filters known spurious outputs ("thank you", "thanks for watching", "[music]", etc.) that the model hallucinates on silence or noise
+- Rejects transcripts shorter than 3 characters
+
 ## Development
 
 ```bash
