@@ -4,9 +4,11 @@ import type { ModelStatus } from '../types';
 interface Props {
   modelStatus: ModelStatus;
   onStatusChange: (status: ModelStatus) => void;
+  healthWarnings: string[];
+  onDismissWarnings: () => void;
 }
 
-export default function DownloadScreen({ modelStatus, onStatusChange }: Props) {
+export default function DownloadScreen({ modelStatus, onStatusChange, healthWarnings, onDismissWarnings }: Props) {
   const { startDownload, cancelDownload } = useDownload(onStatusChange);
 
   const progressPercent =
@@ -16,6 +18,22 @@ export default function DownloadScreen({ modelStatus, onStatusChange }: Props) {
     <div className="flex flex-col items-center justify-center h-screen bg-gray-900 text-white p-8">
       <h1 className="text-2xl font-bold mb-2">Whimper</h1>
       <p className="text-gray-400 mb-8 text-sm">Local voice-to-text transcription</p>
+
+      {healthWarnings.length > 0 && (
+        <div className="w-full max-w-md mb-6 space-y-2">
+          {healthWarnings.map((warning, i) => (
+            <div key={i} className="bg-yellow-900/50 border border-yellow-600 rounded-lg px-4 py-3 text-yellow-200 text-sm">
+              {warning}
+            </div>
+          ))}
+          <button
+            onClick={onDismissWarnings}
+            className="text-xs text-gray-500 hover:text-gray-400 transition-colors"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {modelStatus.kind === 'not_downloaded' && (
         <div className="text-center">

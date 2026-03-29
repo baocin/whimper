@@ -4,7 +4,7 @@ mod download;
 mod paste;
 mod state;
 
-use state::{AppState, ModelStatus, RecordingState};
+use state::{AppState, HealthStatus, ModelStatus, RecordingState};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
@@ -24,6 +24,15 @@ async fn check_model_status(
         return Ok(ModelStatus::Downloaded);
     }
     Ok(ModelStatus::NotDownloaded)
+}
+
+#[tauri::command]
+async fn check_health() -> Result<HealthStatus, String> {
+    Ok(HealthStatus {
+        microphone_available: audio::microphone::is_microphone_available(),
+        accessibility_granted: paste::check_accessibility(),
+        model_files_present: download::is_model_downloaded(),
+    })
 }
 
 #[tauri::command]
@@ -80,14 +89,15 @@ async fn load_model(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String
     Ok(())
 }
 
-#[tauri::command]
-async fn cancel_recording(
-    app_handle: AppHandle,
-    state: tauri::State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+/// Shared cancel logic used by both the Tauri command and the ESC global shortcut.
+async fn do_cancel_recording(app_handle: &AppHandle, state: &Arc<AppState>) {
     let mut recording = state.recording_state.lock().await;
     if *recording == RecordingState::Listening {
         *recording = RecordingState::Idle;
+        drop(recording);
+
+        // Unregister ESC shortcut
+        unregister_escape(app_handle);
 
         // Stop mic stream (don't process audio on cancel)
         if let Ok(mut guard) = state.mic_stream.lock() {
@@ -102,8 +112,18 @@ async fn cancel_recording(
         }
 
         // Restart pre-roll mic
-        start_preroll_mic(&state);
+        start_preroll_mic(state);
+
+        tracing::info!("Recording cancelled");
     }
+}
+
+#[tauri::command]
+async fn cancel_recording(
+    app_handle: AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    do_cancel_recording(&app_handle, &state).await;
     Ok(())
 }
 
@@ -132,7 +152,32 @@ fn start_preroll_mic(state: &Arc<AppState>) {
     }
 }
 
-// ── Global Hotkey Handler ────────────────────────────────────────────────
+// ── ESC Shortcut Management ─────────────────────────────────────────────
+
+static ESC_SHORTCUT: std::sync::LazyLock<Shortcut> =
+    std::sync::LazyLock::new(|| "Escape".parse().unwrap());
+
+fn register_escape(app_handle: &AppHandle) {
+    if let Err(e) = app_handle.global_shortcut().register(*ESC_SHORTCUT) {
+        tracing::warn!("Failed to register ESC shortcut: {}", e);
+    }
+}
+
+fn unregister_escape(app_handle: &AppHandle) {
+    if let Err(e) = app_handle.global_shortcut().unregister(*ESC_SHORTCUT) {
+        tracing::warn!("Failed to unregister ESC shortcut: {}", e);
+    }
+}
+
+// ── Global Hotkey Handlers ───────────────────────────────────────────────
+
+fn handle_escape(app_handle: &AppHandle, state: &Arc<AppState>) {
+    let app = app_handle.clone();
+    let state = state.clone();
+    tauri::async_runtime::spawn(async move {
+        do_cancel_recording(&app, &state).await;
+    });
+}
 
 fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
     let app = app_handle.clone();
@@ -159,6 +204,8 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                 *recording = RecordingState::Listening;
                 tracing::info!("Recording started");
                 drop(recording);
+
+                register_escape(&app);
 
                 // Create overlay window
                 let overlay = tauri::WebviewWindowBuilder::new(
@@ -209,12 +256,16 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                     }
                     Err(e) => {
                         tracing::error!("Failed to start audio pipeline: {}", e);
+                        do_cancel_recording(&app, &state).await;
                     }
                 }
             }
             RecordingState::Listening => {
                 *recording = RecordingState::Idle;
                 drop(recording);
+
+                // Unregister ESC shortcut
+                unregister_escape(&app);
 
                 // Finalize pipeline: stop mic, get audio buffer
                 let audio_samples = if let Ok(mut guard) = state.mic_stream.lock() {
@@ -305,13 +356,18 @@ pub fn run() {
     let app_state = Arc::new(AppState::new());
 
     let state_for_shortcut = app_state.clone();
+    let alt_space: Shortcut = "Alt+Space".parse().unwrap();
 
     tauri::Builder::default()
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(move |app, _shortcut, event| {
+                .with_handler(move |app, shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
-                        handle_hotkey(app, &state_for_shortcut);
+                        if *shortcut == alt_space {
+                            handle_hotkey(app, &state_for_shortcut);
+                        } else if *shortcut == *ESC_SHORTCUT {
+                            handle_escape(app, &state_for_shortcut);
+                        }
                     }
                 })
                 .build(),
@@ -319,6 +375,7 @@ pub fn run() {
         .manage(app_state.clone())
         .invoke_handler(tauri::generate_handler![
             check_model_status,
+            check_health,
             start_download,
             cancel_download,
             load_model,
@@ -326,8 +383,7 @@ pub fn run() {
             hide_main_window,
         ])
         .setup(move |app| {
-            let shortcut: Shortcut = "Alt+Space".parse().unwrap();
-            app.global_shortcut().register(shortcut)?;
+            app.global_shortcut().register(alt_space)?;
 
             // Auto-load model if already downloaded
             let app_handle2 = app.handle().clone();
@@ -359,9 +415,11 @@ pub fn run() {
                         }
                         Ok(Err(e)) => {
                             tracing::error!("Failed to auto-load model: {}", e);
+                            let _ = app_handle2.emit("model-load-error", e.to_string());
                         }
                         Err(e) => {
                             tracing::error!("Model loading task panicked: {}", e);
+                            let _ = app_handle2.emit("model-load-error", e.to_string());
                         }
                     }
                 });

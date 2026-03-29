@@ -26,6 +26,13 @@ pub enum ModelStatus {
     Error { message: String },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthStatus {
+    pub microphone_available: bool,
+    pub accessibility_granted: bool,
+    pub model_files_present: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingState {
     Idle,

@@ -6,6 +6,12 @@ export type ModelStatus =
   | { kind: 'ready' }
   | { kind: 'error'; message: string };
 
+export interface HealthStatus {
+  microphone_available: boolean;
+  accessibility_granted: boolean;
+  model_files_present: boolean;
+}
+
 export type RecordingState = 'idle' | 'listening' | 'processing';
 
 export interface TranscriptUpdate {

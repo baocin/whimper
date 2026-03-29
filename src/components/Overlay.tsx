@@ -1,21 +1,10 @@
 import { useEffect, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useTranscription } from '../hooks/useTranscription';
 
 export default function Overlay() {
   const { transcript } = useTranscription();
   const [processing, setProcessing] = useState(false);
-
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        invoke('cancel_recording');
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
 
   useEffect(() => {
     const unlisten = listen<string>('recording-state', (event) => {
