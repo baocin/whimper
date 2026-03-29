@@ -6,7 +6,7 @@
 //! - 5 duration logits (skip 1-5 frames)
 
 use super::mel_features::{compute_log_mel, MelSpectrogramConfig};
-use super::preprocess::{highpass_80hz, peak_normalize, trim_silence};
+use super::preprocess::{dilate_mask, highpass_80hz, rms_normalize, spectral_gate, trim_silence, vad_speech_mask};
 use super::vad::SileroVad;
 use anyhow::{anyhow, Result};
 use ndarray::Array3;
@@ -63,6 +63,7 @@ pub struct TranscriptionResult {
 pub struct ParakeetAsr {
     model: Mutex<Option<TdtModel>>,
     vad: Mutex<SileroVad>,
+    gtcrn: Mutex<super::gtcrn::GtcrnEnhancer>,
 }
 
 impl ParakeetAsr {
@@ -70,6 +71,7 @@ impl ParakeetAsr {
         Self {
             model: Mutex::new(None),
             vad: Mutex::new(SileroVad::new()),
+            gtcrn: Mutex::new(super::gtcrn::GtcrnEnhancer::new()),
         }
     }
 
@@ -151,6 +153,15 @@ impl ParakeetAsr {
             }
         }
 
+        // Load GTCRN for noise reduction
+        if let Ok(mut gtcrn_guard) = self.gtcrn.lock() {
+            if !gtcrn_guard.is_loaded() {
+                if let Err(e) = gtcrn_guard.load_embedded() {
+                    tracing::warn!("Failed to load GTCRN, noise reduction disabled: {}", e);
+                }
+            }
+        }
+
         tracing::info!("Parakeet TDT model loaded successfully");
 
         *model_guard = Some(TdtModel {
@@ -180,11 +191,49 @@ impl ParakeetAsr {
         let skip_preprocess = std::env::var("WHIMPER_SKIP_PREPROCESS").is_ok();
         let mut buf = samples.to_vec();
 
+        // Speech mask for VAD-gated processing (computed pre-GTCRN, reused for spectral gate)
+        let mut speech_mask: Option<Vec<bool>> = None;
+
         if skip_preprocess {
-            tracing::info!("WHIMPER_SKIP_PREPROCESS set — bypassing highpass/normalize/trim");
+            tracing::info!("WHIMPER_SKIP_PREPROCESS set — bypassing all preprocessing");
         } else {
             highpass_80hz(&mut buf);
-            peak_normalize(&mut buf);
+
+            // Pre-GTCRN VAD scan: identify speech regions for gating
+            if let Ok(mut vad_guard) = self.vad.lock() {
+                if vad_guard.is_loaded() {
+                    let mask = vad_speech_mask(&buf, &mut vad_guard);
+                    speech_mask = Some(dilate_mask(&mask));
+                }
+            }
+            // vad_guard released here — important for lock ordering
+
+            // GTCRN noise reduction: only process speech frames
+            if let Ok(mut gtcrn_guard) = self.gtcrn.lock() {
+                if gtcrn_guard.is_loaded() {
+                    gtcrn_guard.reset_state();
+                    let result = match &speech_mask {
+                        Some(mask) => gtcrn_guard.enhance_vad_gated(&buf, mask),
+                        None => gtcrn_guard.enhance(&buf),
+                    };
+                    match result {
+                        Ok(enhanced) => {
+                            tracing::info!("GTCRN noise reduction applied ({} samples)", enhanced.len());
+                            buf = enhanced;
+                        }
+                        Err(e) => {
+                            tracing::warn!("GTCRN enhancement failed, using original audio: {}", e);
+                        }
+                    }
+                }
+            }
+
+            // Spectral gate: clean up residual GTCRN artifacts using noise floor from non-speech frames
+            if let Some(ref mask) = speech_mask {
+                spectral_gate(&mut buf, mask);
+            }
+
+            rms_normalize(&mut buf);
         }
 
         let raw_peak = samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
@@ -197,6 +246,7 @@ impl ParakeetAsr {
             processed_peak
         );
 
+        // Post-GTCRN VAD trim: more accurate on cleaned audio (second VAD pass)
         let processed = if skip_preprocess {
             &buf[..]
         } else if let Ok(mut vad_guard) = self.vad.lock() {
