@@ -65,6 +65,80 @@ impl GtcrnEnhancer {
         self.model_loaded.load(Ordering::SeqCst)
     }
 
+    /// Enhance a single STFT frame, returning the enhanced complex bins.
+    /// Used by the streaming preprocessor for per-frame processing.
+    pub fn enhance_frame(&mut self, frame: &[Complex32]) -> Result<Vec<Complex32>> {
+        let session = self.session.as_mut().context("GTCRN model not loaded")?;
+
+        let mut mix_data = vec![0.0f32; NUM_BINS * 2];
+        for (i, &c) in frame.iter().enumerate() {
+            mix_data[i * 2] = c.re;
+            mix_data[i * 2 + 1] = c.im;
+        }
+
+        let mix = ort::value::Tensor::from_array(
+            ([1usize, NUM_BINS, 1usize, 2usize], mix_data),
+        ).context("Failed to create mix tensor")?;
+
+        let conv = ort::value::Tensor::from_array(
+            ([2usize, 1usize, 16usize, 16usize, 33usize], self.conv_cache.clone()),
+        ).context("Failed to create conv_cache tensor")?;
+
+        let tra = ort::value::Tensor::from_array(
+            ([2usize, 3usize, 1usize, 1usize, 16usize], self.tra_cache.clone()),
+        ).context("Failed to create tra_cache tensor")?;
+
+        let inter = ort::value::Tensor::from_array(
+            ([2usize, 1usize, 33usize, 16usize], self.inter_cache.clone()),
+        ).context("Failed to create inter_cache tensor")?;
+
+        let outputs = session.run(ort::inputs![
+            "mix" => mix,
+            "conv_cache" => conv,
+            "tra_cache" => tra,
+            "inter_cache" => inter
+        ]).context("GTCRN inference failed")?;
+
+        // Update caches
+        if let Some(out) = outputs.get("conv_cache_out") {
+            if let Ok((_shape, data)) = out.try_extract_tensor::<f32>() {
+                let new: Vec<f32> = data.iter().copied().collect();
+                if new.len() == CONV_CACHE_LEN {
+                    self.conv_cache = new;
+                }
+            }
+        }
+        if let Some(out) = outputs.get("tra_cache_out") {
+            if let Ok((_shape, data)) = out.try_extract_tensor::<f32>() {
+                let new: Vec<f32> = data.iter().copied().collect();
+                if new.len() == TRA_CACHE_LEN {
+                    self.tra_cache = new;
+                }
+            }
+        }
+        if let Some(out) = outputs.get("inter_cache_out") {
+            if let Ok((_shape, data)) = out.try_extract_tensor::<f32>() {
+                let new: Vec<f32> = data.iter().copied().collect();
+                if new.len() == INTER_CACHE_LEN {
+                    self.inter_cache = new;
+                }
+            }
+        }
+
+        let enh_output = outputs.get("enh").context("GTCRN output 'enh' not found")?;
+        let (_shape, enh_data) = enh_output.try_extract_tensor::<f32>()
+            .context("Failed to extract enhanced tensor")?;
+        let enh_vec: Vec<f32> = enh_data.iter().copied().collect();
+
+        Ok((0..NUM_BINS)
+            .map(|i| {
+                let re = enh_vec.get(i * 2).copied().unwrap_or(0.0);
+                let im = enh_vec.get(i * 2 + 1).copied().unwrap_or(0.0);
+                Complex32::new(re, im)
+            })
+            .collect())
+    }
+
     /// Enhance a full audio buffer (16kHz mono f32) by denoising in the STFT domain.
     pub fn enhance(&mut self, samples: &[f32]) -> Result<Vec<f32>> {
         if samples.len() < FFT_SIZE {

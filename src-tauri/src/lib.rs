@@ -247,7 +247,8 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                     }
                 }
 
-                // Start audio pipeline with pre-roll audio prepended
+                // Start audio pipeline (batch mode — streaming preprocessing
+                // is available but not yet production-quality)
                 match audio::pipeline::start_pipeline(Some(&state.preroll_buffer)) {
                     Ok(handle) => {
                         if let Ok(mut guard) = state.mic_stream.lock() {
@@ -293,7 +294,7 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                         let asr = guard
                             .as_ref()
                             .ok_or_else(|| "Model not loaded".to_string())?;
-                        asr.transcribe(&audio_samples)
+                        asr.transcribe(&audio_samples, false)
                             .map(|r| r.text)
                             .map_err(|e| e.to_string())
                     })

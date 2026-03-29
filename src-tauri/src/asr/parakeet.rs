@@ -14,7 +14,7 @@ use ort::session::Session;
 use ort::value::Tensor;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 const ENCODER_DIM: usize = 1024;
@@ -62,17 +62,27 @@ pub struct TranscriptionResult {
 /// Parakeet TDT ASR engine using direct ORT inference
 pub struct ParakeetAsr {
     model: Mutex<Option<TdtModel>>,
-    vad: Mutex<SileroVad>,
-    gtcrn: Mutex<super::gtcrn::GtcrnEnhancer>,
+    vad: Arc<Mutex<SileroVad>>,
+    gtcrn: Arc<Mutex<super::gtcrn::GtcrnEnhancer>>,
 }
 
 impl ParakeetAsr {
     pub fn new() -> Self {
         Self {
             model: Mutex::new(None),
-            vad: Mutex::new(SileroVad::new()),
-            gtcrn: Mutex::new(super::gtcrn::GtcrnEnhancer::new()),
+            vad: Arc::new(Mutex::new(SileroVad::new())),
+            gtcrn: Arc::new(Mutex::new(super::gtcrn::GtcrnEnhancer::new())),
         }
+    }
+
+    /// Get a cloneable handle to the VAD for sharing with the streaming pipeline.
+    pub fn vad_handle(&self) -> Arc<Mutex<SileroVad>> {
+        Arc::clone(&self.vad)
+    }
+
+    /// Get a cloneable handle to the GTCRN enhancer for sharing with the streaming pipeline.
+    pub fn gtcrn_handle(&self) -> Arc<Mutex<super::gtcrn::GtcrnEnhancer>> {
+        Arc::clone(&self.gtcrn)
     }
 
     /// Load model from directory containing encoder, decoder, joiner, and tokens
@@ -179,7 +189,12 @@ impl ParakeetAsr {
     }
 
     /// Transcribe audio samples (16kHz mono f32)
-    pub fn transcribe(&self, samples: &[f32]) -> Result<TranscriptionResult> {
+    /// Transcribe audio samples to text.
+    ///
+    /// If `pre_enhanced` is true, the audio has already been through highpass + VAD-gated GTCRN
+    /// (via streaming preprocessing), so we skip those steps and only run spectral gate,
+    /// RMS normalization, and silence trimming.
+    pub fn transcribe(&self, samples: &[f32], pre_enhanced: bool) -> Result<TranscriptionResult> {
         if samples.is_empty() {
             return Err(anyhow!("Audio samples are empty"));
         }
@@ -187,7 +202,6 @@ impl ParakeetAsr {
         let audio_duration_ms = (samples.len() as f32 / 16.0) as u64;
         let start = Instant::now();
 
-        // Preprocessing: highpass → normalize → trim silence
         let skip_preprocess = std::env::var("WHIMPER_SKIP_PREPROCESS").is_ok();
         let mut buf = samples.to_vec();
 
@@ -196,7 +210,26 @@ impl ParakeetAsr {
 
         if skip_preprocess {
             tracing::info!("WHIMPER_SKIP_PREPROCESS set — bypassing all preprocessing");
+        } else if pre_enhanced {
+            // Streaming mode: highpass + VAD-gated GTCRN already done.
+            // Still run spectral gate (needs full buffer), RMS normalize, and silence trim.
+            tracing::info!("Pre-enhanced audio: skipping highpass and GTCRN");
+
+            // Compute speech mask on already-enhanced audio for spectral gate
+            if let Ok(mut vad_guard) = self.vad.lock() {
+                if vad_guard.is_loaded() {
+                    let mask = vad_speech_mask(&buf, &mut vad_guard);
+                    speech_mask = Some(dilate_mask(&mask));
+                }
+            }
+
+            if let Some(ref mask) = speech_mask {
+                spectral_gate(&mut buf, mask);
+            }
+
+            rms_normalize(&mut buf);
         } else {
+            // Batch mode: full preprocessing pipeline
             highpass_80hz(&mut buf);
 
             // Pre-GTCRN VAD scan: identify speech regions for gating
@@ -599,7 +632,7 @@ mod tests {
     #[test]
     fn test_parakeet_asr_not_loaded_error() {
         let asr = ParakeetAsr::new();
-        let result = asr.transcribe(&[0.0f32; 16000]);
+        let result = asr.transcribe(&[0.0f32; 16000], false);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not loaded"));
     }
