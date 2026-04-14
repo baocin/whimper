@@ -32,18 +32,8 @@ function MainWindow() {
       }
       setHealthWarnings(warnings);
       setModelStatus(status);
-      if (warnings.length === 0 && status.kind === 'ready') {
-        invoke('hide_main_window');
-      }
     });
   }, []);
-
-  // Hide window when model is ready and no warnings
-  useEffect(() => {
-    if (healthWarnings.length === 0 && modelStatus.kind === 'ready') {
-      invoke('hide_main_window');
-    }
-  }, [healthWarnings, modelStatus]);
 
   // Listen for backend auto-load completion
   useEffect(() => {

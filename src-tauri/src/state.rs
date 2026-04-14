@@ -44,6 +44,7 @@ pub struct AppState {
     pub recording_state: Mutex<RecordingState>,
     pub asr: Arc<std::sync::Mutex<Option<ParakeetAsr>>>,
     pub cancel_download: AtomicBool,
+    pub cancel_file_transcription: AtomicBool,
     /// PID of the app that was frontmost before we opened the overlay
     pub previous_app_pid: Mutex<Option<i32>>,
     /// Active audio pipeline — held here so it doesn't get dropped while recording
@@ -61,6 +62,7 @@ impl AppState {
             recording_state: Mutex::new(RecordingState::Idle),
             asr: Arc::new(std::sync::Mutex::new(None)),
             cancel_download: AtomicBool::new(false),
+            cancel_file_transcription: AtomicBool::new(false),
             previous_app_pid: Mutex::new(None),
             mic_stream: std::sync::Mutex::new(None),
             preroll_buffer: Arc::new(PreRollBuffer::new()),
@@ -74,6 +76,14 @@ impl AppState {
 
     pub fn set_cancel_download(&self, cancel: bool) {
         self.cancel_download.store(cancel, Ordering::SeqCst);
+    }
+
+    pub fn is_file_transcription_cancelled(&self) -> bool {
+        self.cancel_file_transcription.load(Ordering::SeqCst)
+    }
+
+    pub fn set_cancel_file_transcription(&self, cancel: bool) {
+        self.cancel_file_transcription.store(cancel, Ordering::SeqCst);
     }
 }
 

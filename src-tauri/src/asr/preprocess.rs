@@ -144,7 +144,7 @@ pub fn spectral_gate(samples: &mut Vec<f32>, speech_mask: &[bool]) {
     const MIN_NOISE_FRAMES: usize = 3;
 
     let window = hann_window(FFT_SIZE);
-    let frames = stft(samples, &window);
+    let mut frames = stft(samples, &window);
     let num_frames = frames.len();
 
     if num_frames == 0 {
@@ -177,27 +177,19 @@ pub fn spectral_gate(samples: &mut Vec<f32>, speech_mask: &[bool]) {
         *nf /= noise_count as f32;
     }
 
-    // Apply soft spectral gate
-    let gated_frames: Vec<Vec<Complex32>> = frames
-        .iter()
-        .map(|frame| {
-            frame
-                .iter()
-                .enumerate()
-                .map(|(bin, &c)| {
-                    let mag = (c.re * c.re + c.im * c.im).sqrt();
-                    let threshold = noise_floor[bin] * GATE_FACTOR;
-                    if threshold <= 0.0 {
-                        return c;
-                    }
-                    let gain = (mag / threshold).clamp(0.0, 1.0);
-                    Complex32::new(c.re * gain, c.im * gain)
-                })
-                .collect()
-        })
-        .collect();
+    // Apply soft spectral gate in-place (avoids a second ~462 MB allocation)
+    for frame in frames.iter_mut() {
+        for (bin, c) in frame.iter_mut().enumerate() {
+            let mag = (c.re * c.re + c.im * c.im).sqrt();
+            let threshold = noise_floor[bin] * GATE_FACTOR;
+            if threshold > 0.0 {
+                let gain = (mag / threshold).clamp(0.0, 1.0);
+                *c = Complex32::new(c.re * gain, c.im * gain);
+            }
+        }
+    }
 
-    let result = istft(&gated_frames, &window, samples.len());
+    let result = istft(&frames, &window, samples.len());
     *samples = result;
 }
 

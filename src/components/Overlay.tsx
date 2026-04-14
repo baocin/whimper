@@ -10,6 +10,8 @@ export default function Overlay() {
     const unlisten = listen<string>('recording-state', (event) => {
       if (event.payload === 'processing') {
         setProcessing(true);
+      } else if (event.payload === 'listening') {
+        setProcessing(false);
       }
     });
     return () => { unlisten.then((f) => f()); };

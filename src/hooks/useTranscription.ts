@@ -6,12 +6,18 @@ export function useTranscription() {
   const [transcript, setTranscript] = useState('');
 
   useEffect(() => {
-    const unlisten = listen<TranscriptUpdate>('transcript-update', (event) => {
+    const unlistenTranscript = listen<TranscriptUpdate>('transcript-update', (event) => {
       setTranscript(event.payload.text);
+    });
+    const unlistenReset = listen<string>('recording-state', (event) => {
+      if (event.payload === 'listening') {
+        setTranscript('');
+      }
     });
 
     return () => {
-      unlisten.then((f) => f());
+      unlistenTranscript.then((f) => f());
+      unlistenReset.then((f) => f());
     };
   }, []);
 

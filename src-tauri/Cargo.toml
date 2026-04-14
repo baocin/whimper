@@ -62,6 +62,13 @@ sysinfo = "0.32"
 
 # Directories
 dirs = "5"
+chrono = "0.4.44"
+
+# Audio file decoding (for file transcription)
+symphonia = { version = "0.5", features = ["aac", "mp3", "isomp4", "pcm"] }
+
+# Native file picker dialog
+rfd = "0.15"
 
 [features]
 default = ["custom-protocol"]

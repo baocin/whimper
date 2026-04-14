@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
+
 // ─��� Tauri Commands ────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -106,9 +107,9 @@ async fn do_cancel_recording(app_handle: &AppHandle, state: &Arc<AppState>) {
             }
         }
 
-        // Close overlay window
+        // Hide overlay window
         if let Some(window) = app_handle.get_webview_window("overlay") {
-            let _ = window.close();
+            let _ = window.hide();
         }
 
         // Restart pre-roll mic
@@ -133,6 +134,126 @@ async fn hide_main_window(app_handle: AppHandle) -> Result<(), String> {
         window.hide().map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[tauri::command]
+async fn show_main_window(app_handle: AppHandle) -> Result<(), String> {
+    if let Some(window) = app_handle.get_webview_window("main") {
+        window.show().map_err(|e| e.to_string())?;
+        window.set_focus().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn cancel_file_transcription(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.set_cancel_file_transcription(true);
+    Ok(())
+}
+
+#[tauri::command]
+async fn pick_and_transcribe_file(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<Option<String>, String> {
+    // Check model is loaded before opening the picker
+    {
+        let guard = state.asr.lock().map_err(|e| format!("ASR lock: {}", e))?;
+        if guard.is_none() {
+            return Err("Model is not loaded yet".to_string());
+        }
+    }
+
+    // Reset cancellation flag before starting
+    state.set_cancel_file_transcription(false);
+
+    // Open native file picker
+    let handle = rfd::AsyncFileDialog::new()
+        .set_title("Choose a media file to transcribe")
+        .add_filter(
+            "Audio/Video",
+            &["mov", "mp4", "m4a", "mp3", "wav", "aac", "flac", "ogg"],
+        )
+        .pick_file()
+        .await;
+
+    let picked = match handle {
+        Some(f) => f,
+        None => return Ok(None), // user cancelled
+    };
+
+    let path = picked.path().to_string_lossy().to_string();
+    tracing::info!("Transcribing file: {}", path);
+
+    let _ = app.emit("recording-state", "processing");
+
+    // 10-minute chunks at 16 kHz — keeps peak memory bounded regardless of file length
+    const CHUNK_SAMPLES: usize = 10 * 60 * 16_000; // 9,600,000 samples
+
+    let asr_arc = state.asr.clone();
+    let state_arc = state.inner().clone();
+    let app_arc = app.clone();
+
+    let transcript = tokio::task::spawn_blocking(move || {
+        let samples = audio::file_decoder::decode_audio_file(&path)?;
+        tracing::info!(
+            "Decoded {} samples ({:.1}s) from file",
+            samples.len(),
+            samples.len() as f64 / 16000.0
+        );
+
+        let guard = asr_arc.lock().map_err(|e| format!("ASR lock: {}", e))?;
+        let asr = guard
+            .as_ref()
+            .ok_or_else(|| "Model not loaded".to_string())?;
+
+        let total_chunks = (samples.len() + CHUNK_SAMPLES - 1) / CHUNK_SAMPLES;
+        let mut parts: Vec<String> = Vec::with_capacity(total_chunks);
+
+        for (i, chunk) in samples.chunks(CHUNK_SAMPLES).enumerate() {
+            if state_arc.is_file_transcription_cancelled() {
+                tracing::info!("File transcription cancelled at chunk {}/{}", i, total_chunks);
+                break;
+            }
+
+            let _ = app_arc.emit(
+                "file-transcribe-progress",
+                serde_json::json!({"current": i, "total": total_chunks}),
+            );
+
+            tracing::info!(
+                "Transcribing chunk {}/{} ({:.1}s)",
+                i + 1,
+                total_chunks,
+                chunk.len() as f64 / 16000.0
+            );
+
+            match asr.transcribe(chunk, false) {
+                Ok(result) if !result.text.is_empty() => parts.push(result.text),
+                Ok(_) => tracing::debug!("Chunk {}/{} produced no speech", i + 1, total_chunks),
+                Err(e) => tracing::warn!("Chunk {}/{} failed: {}", i + 1, total_chunks, e),
+            }
+        }
+
+        let _ = app_arc.emit(
+            "file-transcribe-progress",
+            serde_json::json!({"current": total_chunks, "total": total_chunks}),
+        );
+
+        Ok::<String, String>(parts.join(" "))
+    })
+    .await
+    .map_err(|e| format!("Task panicked: {}", e))??;
+
+    let _ = app.emit("recording-state", "idle");
+
+    tracing::info!(
+        "File transcript ({} chars): {:?}",
+        transcript.len(),
+        &transcript[..transcript.len().min(120)]
+    );
+
+    Ok(Some(transcript))
 }
 
 // ── Pre-roll Mic ─────────────────────────────────────────────────────────
@@ -207,31 +328,10 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
 
                 register_escape(&app);
 
-                // Create overlay window
-                let overlay = tauri::WebviewWindowBuilder::new(
-                    &app,
-                    "overlay",
-                    tauri::WebviewUrl::App("/overlay".into()),
-                )
-                .title("")
-                .inner_size(400.0, 80.0)
-                .decorations(false)
-                .transparent(true)
-                .always_on_top(true)
-                .focused(false)
-                .resizable(false)
-                .build();
-
-                if let Ok(window) = overlay {
-                    if let Ok(monitor) = window.current_monitor() {
-                        if let Some(m) = monitor {
-                            let screen_width: f64 = m.size().width as f64;
-                            let x = (screen_width / 2.0 - 200.0) as i32;
-                            let _ = window.set_position(tauri::Position::Physical(
-                                tauri::PhysicalPosition::new(x, 100),
-                            ));
-                        }
-                    }
+                // Show the pre-created overlay window and reset its state
+                let _ = app.emit("recording-state", "listening");
+                if let Some(window) = app.get_webview_window("overlay") {
+                    let _ = window.show();
                 }
 
                 // Re-activate previous app so overlay doesn't steal keyboard focus
@@ -320,9 +420,27 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                     &transcript[..transcript.len().min(120)]
                 );
 
-                // Close overlay
+                // Append transcript to log file (in app data dir to avoid
+                // triggering cargo-tauri dev file watcher)
+                if !transcript.trim().is_empty() {
+                    use std::io::Write;
+                    if let Ok(data_dir) = app.path().app_data_dir() {
+                        let _ = std::fs::create_dir_all(&data_dir);
+                        let log_path = data_dir.join("log.txt");
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&log_path)
+                        {
+                            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                            let _ = writeln!(f, "[{}] {}", timestamp, transcript.trim());
+                        }
+                    }
+                }
+
+                // Hide overlay
                 if let Some(window) = app.get_webview_window("overlay") {
-                    let _ = window.close();
+                    let _ = window.hide();
                 }
 
                 // Paste if we have text (and it's not a hallucination)
@@ -382,9 +500,37 @@ pub fn run() {
             load_model,
             cancel_recording,
             hide_main_window,
+            show_main_window,
+            pick_and_transcribe_file,
+            cancel_file_transcription,
         ])
         .setup(move |app| {
             app.global_shortcut().register(alt_space)?;
+
+            // Create overlay window once (hidden) — avoids Vite HMR reloads
+            // from repeated webview creation/destruction
+            let overlay = tauri::WebviewWindowBuilder::new(
+                app,
+                "overlay",
+                tauri::WebviewUrl::App("/overlay".into()),
+            )
+            .title("")
+            .inner_size(400.0, 80.0)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .focused(false)
+            .resizable(false)
+            .visible(false)
+            .build()?;
+
+            if let Ok(Some(m)) = overlay.current_monitor() {
+                let screen_width = m.size().width as f64;
+                let x = (screen_width / 2.0 - 200.0) as i32;
+                let _ = overlay.set_position(tauri::Position::Physical(
+                    tauri::PhysicalPosition::new(x, 100),
+                ));
+            }
 
             // Auto-load model if already downloaded
             let app_handle2 = app.handle().clone();
