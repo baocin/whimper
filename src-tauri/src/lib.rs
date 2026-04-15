@@ -187,8 +187,12 @@ async fn pick_and_transcribe_file(
 
     let _ = app.emit("recording-state", "processing");
 
-    // 10-minute chunks at 16 kHz — keeps peak memory bounded regardless of file length
-    const CHUNK_SAMPLES: usize = 10 * 60 * 16_000; // 9,600,000 samples
+    // Parakeet TDT encoder has a fixed positional encoding buffer of 9 999 entries.
+    // With 8× subsampling, a 600s chunk produces ~7 500 encoder tokens, requiring a
+    // position table of 2×7500−1 = 14 999 — exceeding the limit and crashing every chunk.
+    // Safe limit: ≤5 000 encoder tokens = ~40 000 mel frames = ~400s.
+    // Use 5-minute chunks (~3 750 tokens) for a comfortable safety margin.
+    const CHUNK_SAMPLES: usize = 5 * 60 * 16_000; // 4,800,000 samples = 300s
 
     let asr_arc = state.asr.clone();
     let state_arc = state.inner().clone();
