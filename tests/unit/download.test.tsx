@@ -22,7 +22,7 @@ describe('DownloadScreen', () => {
     const status: ModelStatus = { kind: 'not_downloaded' };
     render(<DownloadScreen modelStatus={status} onStatusChange={mockOnStatusChange} />);
     expect(screen.getByText('Download Model')).toBeInTheDocument();
-    expect(screen.getByText(/2.5 GB/)).toBeInTheDocument();
+    expect(screen.getByText(/662 MB/)).toBeInTheDocument();
   });
 
   it('shows progress bar when downloading', () => {
@@ -36,7 +36,7 @@ describe('DownloadScreen', () => {
   it('shows loading spinner when model is loading', () => {
     const status: ModelStatus = { kind: 'loading' };
     render(<DownloadScreen modelStatus={status} onStatusChange={mockOnStatusChange} />);
-    expect(screen.getByText('Loading model on GPU...')).toBeInTheDocument();
+    expect(screen.getByText('Loading model...')).toBeInTheDocument();
   });
 
   it('shows error with retry button', () => {

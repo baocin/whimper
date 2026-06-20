@@ -32,6 +32,31 @@ pub enum RecordingState {
     Listening,
 }
 
+/// Whether the global hotkey can work, and if not, why — surfaced to the UI.
+///
+/// Lives here (not in the Linux-only `input` module) so the Tauri command and
+/// `AppState` field compile on macOS, where it stays `Available` (the macOS
+/// hotkey goes through the global-shortcut plugin, not evdev).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HotkeyStatus {
+    /// At least one keyboard is readable; the listener is running.
+    Available,
+    /// User IS in the `input` group, but this session hasn't picked it up and
+    /// self-heal didn't apply. Logging out and back in fixes it.
+    NeedsRelogin,
+    /// User is NOT in the `input` group. They must be added, then re-login.
+    NeedsGroupAdd,
+    /// No keyboard device was found at all.
+    NoKeyboard,
+}
+
+impl Default for HotkeyStatus {
+    fn default() -> Self {
+        HotkeyStatus::Available
+    }
+}
+
 pub struct AppState {
     pub model_status: Mutex<ModelStatus>,
     pub recording_state: Mutex<RecordingState>,
@@ -45,6 +70,8 @@ pub struct AppState {
     pub preroll_buffer: Arc<PreRollBuffer>,
     /// Handle to the background pre-roll mic stream
     pub preroll_mic: std::sync::Mutex<Option<PipelineHandle>>,
+    /// Whether the global hotkey is usable (Linux: evdev keyboard readable).
+    pub hotkey_status: std::sync::Mutex<HotkeyStatus>,
 }
 
 impl AppState {
@@ -58,6 +85,7 @@ impl AppState {
             mic_stream: std::sync::Mutex::new(None),
             preroll_buffer: Arc::new(PreRollBuffer::new()),
             preroll_mic: std::sync::Mutex::new(None),
+            hotkey_status: std::sync::Mutex::new(HotkeyStatus::default()),
         }
     }
 
@@ -70,10 +98,18 @@ impl AppState {
     }
 }
 
+/// Return the whimper data directory: ~/.whimper
+///
+/// Base for the model cache and the transcript log. Falls back to a relative
+/// `.whimper` if the home directory can't be resolved (better than panicking).
+pub fn whimper_dir() -> std::path::PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    home.join(".whimper")
+}
+
 /// Return the model directory path: ~/.whimper/models/parakeet-tdt/
 pub fn model_dir() -> std::path::PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    home.join(".whimper").join("models").join("parakeet-tdt")
+    whimper_dir().join("models").join("parakeet-tdt")
 }
 
 #[cfg(test)]
@@ -89,6 +125,27 @@ mod tests {
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("downloading"));
         assert!(json.contains("0.5"));
+    }
+
+    #[test]
+    fn test_hotkey_status_serialization() {
+        assert_eq!(
+            serde_json::to_string(&HotkeyStatus::Available).unwrap(),
+            "\"available\""
+        );
+        assert_eq!(
+            serde_json::to_string(&HotkeyStatus::NeedsGroupAdd).unwrap(),
+            "\"needs_group_add\""
+        );
+        assert_eq!(
+            serde_json::to_string(&HotkeyStatus::NeedsRelogin).unwrap(),
+            "\"needs_relogin\""
+        );
+        assert_eq!(
+            serde_json::to_string(&HotkeyStatus::NoKeyboard).unwrap(),
+            "\"no_keyboard\""
+        );
+        assert_eq!(HotkeyStatus::default(), HotkeyStatus::Available);
     }
 
     #[test]

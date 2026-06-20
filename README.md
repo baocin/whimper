@@ -14,6 +14,34 @@ Seriously got tired of not owning the software that most of my thoughts were str
 
 All speech processing happens locally via ONNX Runtime. No network calls after the initial model download.
 
+## Transcript log
+
+Every transcription attempt is appended to `~/.whimper/transcripts.jsonl` — one JSON
+object per line, holding the **full, untruncated** text plus timing. This includes
+empty / silence-trimmed results and hallucination-filtered results (which are not
+pasted), so the log is a complete record of what the model produced.
+
+Each line has these fields:
+
+| field | meaning |
+|-------|---------|
+| `ts_rfc3339` | UTC timestamp, RFC 3339 |
+| `text` | full transcript text (untruncated) |
+| `audio_duration_ms` | length of captured audio |
+| `processing_time_ms` | wall-clock transcription time |
+| `rtf` | real-time factor (`processing / audio`; lower is faster) |
+| `pasted` | whether the text was pasted into the focused app |
+| `hallucination` | matched a known hallucination pattern (skip-paste) |
+| `empty` | empty / trimmed to nothing (skip-paste) |
+
+The file is created with mode `0600` (owner-only) because it contains private
+speech content. Writes are append-only (`O_APPEND`) and flushed per line; a write
+failure is logged and never blocks or crashes the paste path.
+
+**Opt out:** set `WHIMPER_NO_TRANSCRIPT_LOG=1` to disable logging entirely. Nothing
+is written while it's set. Delete `~/.whimper/transcripts.jsonl` at any time to clear
+the history.
+
 ## Requirements
 
 ### macOS
@@ -28,6 +56,7 @@ All speech processing happens locally via ONNX Runtime. No network calls after t
   sudo usermod -aG input $USER   # then log out and back in
   ```
   Wayland doesn't let apps grab global shortcuts, so the Alt+Space hotkey is detected by reading `/dev/input/event*` directly via evdev.
+  - **Group not active yet?** If you're already in the `input` group but your *current login session* started before you were added (supplementary groups are fixed at login), whimper can't read the keyboard. On startup it detects this and **self-heals** by re-launching itself under the group via `sg input` (no sudo, no re-login needed). If you're not a member at all, the app stays visible and shows an in-window warning with the exact fix instead of failing silently.
 - **Wayland (Hyprland/Sway/wlroots):** key injection uses the `zwp_virtual_keyboard` protocol, which these compositors support out of the box. To stop the recording overlay from stealing keyboard focus (which would send the paste to the overlay instead of your app), add these rules to your Hyprland config:
   ```
   windowrulev2 = noinitialfocus, title:^(whimper-overlay)$

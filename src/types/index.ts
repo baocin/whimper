@@ -8,6 +8,12 @@ export type ModelStatus =
 
 export type RecordingState = 'idle' | 'listening' | 'processing';
 
+export type HotkeyStatus =
+  | 'available'
+  | 'needs_relogin'
+  | 'needs_group_add'
+  | 'no_keyboard';
+
 export interface TranscriptUpdate {
   text: string;
   is_final: boolean;

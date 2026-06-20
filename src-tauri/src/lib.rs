@@ -5,6 +5,7 @@ mod download;
 mod input;
 mod paste;
 mod state;
+mod transcript;
 
 use state::{AppState, ModelStatus, RecordingState};
 use std::sync::Arc;
@@ -117,6 +118,13 @@ async fn hide_main_window(app_handle: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn check_hotkey_status(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<state::HotkeyStatus, String> {
+    Ok(state.hotkey_status.lock().map(|g| *g).unwrap_or_default())
+}
+
 // ── Pre-roll Mic ─────────────────────────────────────────────────────────
 
 /// Start (or restart) the background pre-roll mic that fills the ring buffer.
@@ -134,6 +142,17 @@ fn start_preroll_mic(state: &Arc<AppState>) {
     }
 }
 
+/// Recover the recording state machine to Idle after a failed start: reset
+/// state, close the overlay, and resume the background pre-roll mic. Used when a
+/// start-up stage fails mid-way so a transient error can't wedge Listening.
+async fn recover_to_idle(app: &AppHandle, state: &Arc<AppState>) {
+    *state.recording_state.lock().await = RecordingState::Idle;
+    if let Some(window) = app.get_webview_window("overlay") {
+        let _ = window.close();
+    }
+    start_preroll_mic(state);
+}
+
 // ── Global Hotkey Handler ────────────────────────────────────────────────
 
 fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
@@ -146,9 +165,15 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
         match *recording {
             RecordingState::Idle => {
                 // Check model is ready
-                if let Ok(guard) = state.asr.lock() {
-                    if guard.is_none() {
-                        tracing::warn!("Model not loaded, ignoring hotkey");
+                match state.asr.lock() {
+                    Ok(guard) => {
+                        if guard.is_none() {
+                            tracing::warn!("Model not loaded, ignoring hotkey");
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("ASR lock poisoned, ignoring hotkey: {}", e);
                         return;
                     }
                 }
@@ -197,22 +222,42 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                 }
 
                 // Stop pre-roll mic before starting recording (avoid two mic streams)
-                if let Ok(mut guard) = state.preroll_mic.lock() {
-                    if let Some(handle) = guard.take() {
-                        handle.stop_mic();
-                        tracing::info!("Pre-roll mic stopped for recording");
+                match state.preroll_mic.lock() {
+                    Ok(mut guard) => {
+                        if let Some(handle) = guard.take() {
+                            handle.stop_mic();
+                            tracing::info!("Pre-roll mic stopped for recording");
+                        }
                     }
+                    Err(e) => tracing::error!("preroll_mic lock poisoned: {}", e),
                 }
 
                 // Start audio pipeline with pre-roll audio prepended
                 match audio::pipeline::start_pipeline(Some(&state.preroll_buffer)) {
                     Ok(handle) => {
-                        if let Ok(mut guard) = state.mic_stream.lock() {
-                            *guard = Some(handle);
+                        // Store the stream, then drop the (non-Send) std mutex
+                        // guard *before* any await. `stored` carries the outcome
+                        // out of the guard's scope.
+                        let stored = match state.mic_stream.lock() {
+                            Ok(mut guard) => {
+                                *guard = Some(handle);
+                                true
+                            }
+                            Err(e) => {
+                                tracing::error!("mic_stream lock poisoned: {}", e);
+                                false
+                            }
+                        };
+                        if !stored {
+                            recover_to_idle(&app, &state).await;
                         }
                     }
                     Err(e) => {
+                        // Pipeline failed to start: recover the state machine to
+                        // Idle so a transient mic error doesn't wedge Listening
+                        // forever, close the overlay, and resume pre-roll.
                         tracing::error!("Failed to start audio pipeline: {}", e);
+                        recover_to_idle(&app, &state).await;
                     }
                 }
             }
@@ -221,10 +266,12 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                 drop(recording);
 
                 // Finalize pipeline: stop mic, get audio buffer
-                let audio_samples = if let Ok(mut guard) = state.mic_stream.lock() {
-                    guard.take().map(|h| h.finalize()).unwrap_or_default()
-                } else {
-                    Vec::new()
+                let audio_samples = match state.mic_stream.lock() {
+                    Ok(mut guard) => guard.take().map(|h| h.finalize()).unwrap_or_default(),
+                    Err(e) => {
+                        tracing::error!("mic_stream lock poisoned on stop: {}", e);
+                        Vec::new()
+                    }
                 };
 
                 tracing::info!(
@@ -238,34 +285,40 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
 
                 let _ = app.emit("recording-state", "processing");
 
-                // Batch-transcribe on blocking thread
+                // Fallback duration if transcribe never runs (empty audio / error).
+                let fallback_duration_ms = (audio_samples.len() as f64 / 16.0) as u64;
+
+                // Batch-transcribe on blocking thread. Capture the full result
+                // (text + timings) so the durable log gets untruncated text and RTF.
                 let asr_arc = state.asr.clone();
-                let transcript = if !audio_samples.is_empty() {
+                let (transcript, processing_time_ms, audio_duration_ms) = if !audio_samples
+                    .is_empty()
+                {
                     match tokio::task::spawn_blocking(move || {
                         let guard = asr_arc.lock().map_err(|e| format!("ASR lock: {}", e))?;
                         let asr = guard
                             .as_ref()
                             .ok_or_else(|| "Model not loaded".to_string())?;
-                        asr.transcribe(&audio_samples)
-                            .map(|r| r.text)
-                            .map_err(|e| e.to_string())
+                        asr.transcribe(&audio_samples).map_err(|e| e.to_string())
                     })
                     .await
                     {
-                        Ok(Ok(text)) => text,
+                        Ok(Ok(r)) => (r.text, r.processing_time_ms, r.audio_duration_ms),
                         Ok(Err(e)) => {
                             tracing::error!("Transcription failed: {}", e);
-                            String::new()
+                            (String::new(), 0, fallback_duration_ms)
                         }
                         Err(e) => {
                             tracing::error!("Transcription task panicked: {}", e);
-                            String::new()
+                            (String::new(), 0, fallback_duration_ms)
                         }
                     }
                 } else {
-                    String::new()
+                    (String::new(), 0, fallback_duration_ms)
                 };
 
+                // tracing stays truncated for readability; the JSONL log below
+                // holds the full text — don't double-truncate.
                 tracing::info!(
                     "Transcript ({} chars): {:?}",
                     transcript.len(),
@@ -277,20 +330,36 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                     let _ = window.close();
                 }
 
-                // Paste if we have text (and it's not a hallucination)
-                if !transcript.trim().is_empty()
-                    && !asr::ParakeetAsr::is_hallucination(&transcript)
-                {
+                // Decide paste using the same classification we persist, so the
+                // logged flags can never disagree with the behaviour.
+                let (empty, hallucination) = transcript::classify_flags(&transcript);
+                let mut pasted = false;
+                if !empty && !hallucination {
                     let prev_pid = *state.previous_app_pid.lock().await;
 
                     // Small delay for overlay to close
                     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
                     match paste::paste_text(&transcript, prev_pid) {
-                        Ok(_) => tracing::info!("Paste succeeded"),
+                        Ok(_) => {
+                            tracing::info!("Paste succeeded");
+                            pasted = true;
+                        }
                         Err(e) => tracing::error!("Paste failed: {}", e),
                     }
                 }
+
+                // Durable log of EVERY attempt (empty / hallucination / skipped
+                // paste included). Append happens after paste so it never adds
+                // latency to or blocks the paste path; a write error is logged
+                // inside `append` and is non-fatal.
+                let record = transcript::TranscriptRecord::new(
+                    transcript,
+                    audio_duration_ms,
+                    processing_time_ms,
+                    pasted,
+                );
+                transcript::append(&record);
             }
         }
     });
@@ -315,6 +384,20 @@ pub fn run() {
         )
         .init();
 
+    // Self-heal keyboard access (Linux): if we can't read the keyboard because
+    // the session never picked up the `input` group, but the user IS a member,
+    // re-exec under `sg input` (no sudo) so the hotkey works without re-login.
+    // The env guard prevents an infinite loop; if self-heal can't apply, we fall
+    // through and the UI surfaces the problem instead.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WHIMPER_INPUT_REEXEC").is_none()
+        && input::probe_keyboard_access() == input::Probe::PermissionDenied
+        && input::user_in_input_group()
+    {
+        let e = input::reexec_with_input_group();
+        tracing::error!("self-heal re-exec failed, continuing without it: {}", e);
+    }
+
     let app_state = Arc::new(AppState::new());
 
     let state_for_shortcut = app_state.clone();
@@ -337,6 +420,7 @@ pub fn run() {
             load_model,
             cancel_recording,
             hide_main_window,
+            check_hotkey_status,
         ])
         .setup(move |app| {
             // Hotkey: macOS uses the Tauri global-shortcut plugin. On Wayland
@@ -344,17 +428,30 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             {
                 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
-                let shortcut: Shortcut = "Alt+Space".parse().unwrap();
-                app.global_shortcut().register(shortcut)?;
+                match "Alt+Space".parse::<Shortcut>() {
+                    Ok(shortcut) => {
+                        if let Err(e) = app.global_shortcut().register(shortcut) {
+                            tracing::error!("Failed to register Alt+Space shortcut: {}", e);
+                        }
+                    }
+                    Err(e) => tracing::error!("Failed to parse Alt+Space shortcut: {}", e),
+                }
             }
 
             #[cfg(target_os = "linux")]
             {
                 let app_for_hotkey = app.handle().clone();
                 let state_for_hotkey = app_state.clone();
-                input::start_evdev_listener(move || {
+                let hotkey_status = input::start_evdev_listener(move || {
                     handle_hotkey(&app_for_hotkey, &state_for_hotkey);
                 });
+                if let Ok(mut g) = app_state.hotkey_status.lock() {
+                    *g = hotkey_status;
+                }
+                if hotkey_status != state::HotkeyStatus::Available {
+                    // Live-notify the UI (it also queries on mount).
+                    let _ = app.handle().emit("hotkey-status", hotkey_status);
+                }
             }
 
             // Auto-load model if already downloaded
@@ -398,7 +495,11 @@ pub fn run() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("error while running whimper");
+        .unwrap_or_else(|e| {
+            // Don't panic on a runtime failure of the Tauri event loop; surface
+            // it through tracing so it lands in logs instead of an abort.
+            tracing::error!("fatal: whimper runtime error: {}", e);
+        });
 }
 
 #[cfg(test)]

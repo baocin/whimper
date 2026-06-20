@@ -1,12 +1,15 @@
+import type { ReactNode } from 'react';
 import { useDownload } from '../hooks/useDownload';
 import type { ModelStatus } from '../types';
 
 interface Props {
   modelStatus: ModelStatus;
   onStatusChange: (status: ModelStatus) => void;
+  /** Optional banner rendered under the header (e.g. the hotkey warning). */
+  banner?: ReactNode;
 }
 
-export default function DownloadScreen({ modelStatus, onStatusChange }: Props) {
+export default function DownloadScreen({ modelStatus, onStatusChange, banner }: Props) {
   const { startDownload, cancelDownload } = useDownload(onStatusChange);
 
   const progressPercent =
@@ -16,6 +19,8 @@ export default function DownloadScreen({ modelStatus, onStatusChange }: Props) {
     <div className="flex flex-col items-center justify-center h-screen bg-gray-900 text-white p-8">
       <h1 className="text-2xl font-bold mb-2">Whimper</h1>
       <p className="text-gray-400 mb-8 text-sm">Local voice-to-text transcription</p>
+
+      {banner}
 
       {modelStatus.kind === 'not_downloaded' && (
         <div className="text-center">

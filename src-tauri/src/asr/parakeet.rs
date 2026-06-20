@@ -10,10 +10,11 @@ use super::preprocess::{highpass_80hz, peak_normalize, trim_silence};
 use super::vad::SileroVad;
 use anyhow::{anyhow, Result};
 use ndarray::Array3;
+use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 use ort::value::Tensor;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -28,6 +29,41 @@ struct TdtModel {
     decoder: Session,
     joiner: Session,
     vocab: Vec<String>,
+}
+
+/// Physical CPU core count, used to size ONNX Runtime's intra-op thread pool.
+/// INT8 CPU inference scales with physical (not logical) cores; oversubscribing
+/// with hyperthreads adds sync overhead without throughput. Falls back
+/// conservatively if detection fails.
+fn physical_cores() -> usize {
+    sysinfo::System::new()
+        .physical_core_count()
+        .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
+        .unwrap_or(4)
+        .max(1)
+}
+
+/// Read a usize from an env var, falling back to `default` if unset/invalid.
+fn env_threads(var: &str, default: usize) -> usize {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(default)
+}
+
+/// Build an ONNX Runtime session with full graph optimization and a fixed
+/// intra-op thread count. Inter-op threads are left at 1: execution is
+/// sequential, so inter-op parallelism would only add idle pool threads.
+fn build_session(path: &Path, intra_threads: usize) -> Result<Session> {
+    Session::builder()
+        .map_err(|e| anyhow!("Session builder error: {}", e))?
+        .with_optimization_level(GraphOptimizationLevel::All)
+        .map_err(|e| anyhow!("Optimization level error: {}", e))?
+        .with_intra_threads(intra_threads)
+        .map_err(|e| anyhow!("Thread config error: {}", e))?
+        .commit_from_file(path)
+        .map_err(|e| anyhow!("Failed to load {:?}: {}", path, e))
 }
 
 fn load_vocabulary(tokens_path: &PathBuf) -> Result<Vec<String>> {
@@ -121,26 +157,27 @@ impl ParakeetAsr {
         let vocab = load_vocabulary(&tokens_path)?;
         tracing::info!("Loaded vocabulary: {} tokens", vocab.len());
 
-        let encoder = Session::builder()
-            .map_err(|e| anyhow!("Session builder error: {}", e))?
-            .with_intra_threads(4)
-            .map_err(|e| anyhow!("Thread config error: {}", e))?
-            .commit_from_file(&encoder_path)
-            .map_err(|e| anyhow!("Failed to load encoder: {}", e))?;
+        // Thread sizing: the encoder is one big batched op that scales with
+        // physical cores; the decoder and joiner are tiny tensors invoked
+        // hundreds of times in the greedy loop, where a large thread pool only
+        // adds per-call sync overhead — so they get a small fixed count.
+        // Both are overridable via env for benchmarking.
+        let cores = physical_cores();
+        let enc_threads = env_threads("WHIMPER_ENCODER_THREADS", cores);
+        let small_threads = env_threads("WHIMPER_DECODER_THREADS", 2);
+        tracing::info!(
+            "ONNX sessions: encoder intra-threads={}, decoder/joiner intra-threads={} (physical_cores={}, opt=All)",
+            enc_threads,
+            small_threads,
+            cores
+        );
 
-        let decoder = Session::builder()
-            .map_err(|e| anyhow!("Session builder error: {}", e))?
-            .with_intra_threads(4)
-            .map_err(|e| anyhow!("Thread config error: {}", e))?
-            .commit_from_file(&decoder_path)
-            .map_err(|e| anyhow!("Failed to load decoder: {}", e))?;
-
-        let joiner = Session::builder()
-            .map_err(|e| anyhow!("Session builder error: {}", e))?
-            .with_intra_threads(4)
-            .map_err(|e| anyhow!("Thread config error: {}", e))?
-            .commit_from_file(&joiner_path)
-            .map_err(|e| anyhow!("Failed to load joiner: {}", e))?;
+        let encoder = build_session(&encoder_path, enc_threads)
+            .map_err(|e| anyhow!("encoder: {}", e))?;
+        let decoder = build_session(&decoder_path, small_threads)
+            .map_err(|e| anyhow!("decoder: {}", e))?;
+        let joiner = build_session(&joiner_path, small_threads)
+            .map_err(|e| anyhow!("joiner: {}", e))?;
 
         // Load Silero VAD for silence trimming
         if let Ok(mut vad_guard) = self.vad.lock() {
@@ -561,5 +598,101 @@ mod tests {
         assert!(ParakeetAsr::is_hallucination("[music]"));
         assert!(ParakeetAsr::is_hallucination(".."));
         assert!(!ParakeetAsr::is_hallucination("I ordered the salmon"));
+    }
+
+    #[test]
+    fn test_env_threads_parsing() {
+        std::env::set_var("WHIMPER_TEST_THREADS_X", "8");
+        assert_eq!(env_threads("WHIMPER_TEST_THREADS_X", 4), 8);
+        std::env::remove_var("WHIMPER_TEST_THREADS_X");
+        assert_eq!(env_threads("WHIMPER_TEST_THREADS_X", 4), 4);
+        std::env::set_var("WHIMPER_TEST_THREADS_X", "0"); // invalid -> default
+        assert_eq!(env_threads("WHIMPER_TEST_THREADS_X", 4), 4);
+        std::env::remove_var("WHIMPER_TEST_THREADS_X");
+    }
+
+    #[test]
+    fn test_physical_cores_at_least_one() {
+        assert!(physical_cores() >= 1);
+    }
+
+    /// Real-model RTF benchmark. Ignored by default (needs the downloaded model
+    /// and a raw f32le 16kHz mono audio fixture). Run e.g.:
+    ///
+    ///   WHIMPER_BENCH_AUDIO=/tmp/whimper_bench/jfk.f32 \
+    ///     cargo test --release -p whimper bench_rtf -- --ignored --nocapture
+    ///
+    /// Set WHIMPER_ENCODER_THREADS to compare thread configs on one build.
+    #[test]
+    #[ignore]
+    fn bench_rtf() {
+        let audio_path = std::env::var("WHIMPER_BENCH_AUDIO")
+            .expect("set WHIMPER_BENCH_AUDIO to a raw f32le 16k mono file");
+        let bytes = std::fs::read(&audio_path).expect("read audio fixture");
+        let samples: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        eprintln!(
+            "BENCH: {} samples ({:.2}s) from {}",
+            samples.len(),
+            samples.len() as f32 / 16000.0,
+            audio_path
+        );
+
+        let model_dir = crate::state::model_dir();
+        let asr = ParakeetAsr::new();
+
+        let load_start = Instant::now();
+        asr.load_model(&model_dir.to_string_lossy())
+            .expect("load model");
+        eprintln!(
+            "BENCH: cold-start model load = {} ms",
+            load_start.elapsed().as_millis()
+        );
+
+        for i in 0..3 {
+            let r = asr.transcribe(&samples).expect("transcribe");
+            let rtf = r.processing_time_ms as f32 / r.audio_duration_ms.max(1) as f32;
+            eprintln!(
+                "BENCH run {}: processing={} ms, audio={} ms, RTF={:.3}, text=\"{}\"",
+                i,
+                r.processing_time_ms,
+                r.audio_duration_ms,
+                rtf,
+                r.text
+            );
+            // Exercise the durable log end-to-end with the real model output.
+            let rec = crate::transcript::TranscriptRecord::new(
+                r.text,
+                r.audio_duration_ms,
+                r.processing_time_ms,
+                false,
+            );
+            crate::transcript::append(&rec);
+        }
+
+        // Also exercise the empty/VAD-trimmed branch if a silence fixture is set.
+        if let Ok(silence_path) = std::env::var("WHIMPER_BENCH_SILENCE") {
+            let bytes = std::fs::read(&silence_path).expect("read silence fixture");
+            let sil: Vec<f32> = bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            let r = asr.transcribe(&sil).expect("transcribe silence");
+            eprintln!(
+                "BENCH silence: processing={} ms, text=\"{}\" (empty={})",
+                r.processing_time_ms,
+                r.text,
+                r.text.trim().is_empty()
+            );
+            let rec = crate::transcript::TranscriptRecord::new(
+                r.text,
+                r.audio_duration_ms,
+                r.processing_time_ms,
+                false,
+            );
+            crate::transcript::append(&rec);
+        }
     }
 }

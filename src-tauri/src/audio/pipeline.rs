@@ -26,21 +26,27 @@ impl PreRollBuffer {
 
     /// Push samples into the ring buffer, evicting oldest if over capacity.
     pub fn push(&self, samples: &[f32]) {
-        if let Ok(mut buf) = self.buf.lock() {
-            buf.extend(samples);
-            let overflow = buf.len().saturating_sub(PREROLL_CAPACITY);
-            if overflow > 0 {
-                buf.drain(..overflow);
+        match self.buf.lock() {
+            Ok(mut buf) => {
+                buf.extend(samples);
+                let overflow = buf.len().saturating_sub(PREROLL_CAPACITY);
+                if overflow > 0 {
+                    buf.drain(..overflow);
+                }
             }
+            Err(e) => tracing::error!("pre-roll buffer lock poisoned on push: {}", e),
         }
     }
 
     /// Drain all samples from the buffer, returning them as a Vec.
     pub fn drain(&self) -> Vec<f32> {
-        self.buf
-            .lock()
-            .map(|mut buf| buf.drain(..).collect())
-            .unwrap_or_default()
+        match self.buf.lock() {
+            Ok(mut buf) => buf.drain(..).collect(),
+            Err(e) => {
+                tracing::error!("pre-roll buffer lock poisoned on drain: {}", e);
+                Vec::new()
+            }
+        }
     }
 }
 
@@ -53,7 +59,14 @@ pub struct PipelineHandle {
     accumulator: Arc<Mutex<Vec<f32>>>,
 }
 
-// MicStream is Send (unsafe impl in microphone.rs), and everything else is Arc/Mutex
+// Safety: `PipelineHandle` has exactly two fields:
+//   - `mic_stream: MicStream`, which is independently declared `Send` (see the
+//     `unsafe impl Send for MicStream` in microphone.rs; cpal's stream handle is
+//     safe to move across threads on the platforms we target).
+//   - `accumulator: Arc<Mutex<Vec<f32>>>`, which is `Send` unconditionally.
+// A type whose every field is `Send` is itself sound to send across threads, so
+// this `unsafe impl` only restates what the fields already guarantee — it exists
+// solely because the auto-derive is blocked by `MicStream`'s `!Send` inner type.
 unsafe impl Send for PipelineHandle {}
 
 impl PipelineHandle {
@@ -67,10 +80,13 @@ impl PipelineHandle {
         self.mic_stream.stop();
         // Flush remaining resampler samples before draining the accumulator
         self.mic_stream.flush_resampler();
-        self.accumulator
-            .lock()
-            .map(|mut acc| acc.drain(..).collect())
-            .unwrap_or_default()
+        match self.accumulator.lock() {
+            Ok(mut acc) => acc.drain(..).collect(),
+            Err(e) => {
+                tracing::error!("accumulator lock poisoned on finalize: {}", e);
+                Vec::new()
+            }
+        }
     }
 }
 
@@ -116,8 +132,9 @@ pub fn start_pipeline(preroll: Option<&PreRollBuffer>) -> Result<PipelineHandle>
     let acc_clone = Arc::clone(&accumulator);
 
     let stream = microphone::start_capture(Box::new(move |samples: &[f32]| {
-        if let Ok(mut acc) = acc_clone.lock() {
-            acc.extend_from_slice(samples);
+        match acc_clone.lock() {
+            Ok(mut acc) => acc.extend_from_slice(samples),
+            Err(e) => tracing::error!("recording accumulator lock poisoned: {}", e),
         }
     }))?;
 
