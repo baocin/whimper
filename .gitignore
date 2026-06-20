@@ -3,3 +3,8 @@ dist/
 target/
 *.part
 .DS_Store
+
+# TS/Vite build artifacts
+tsconfig.tsbuildinfo
+tsconfig.node.tsbuildinfo
+vite.config.d.ts

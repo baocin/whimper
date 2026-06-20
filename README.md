@@ -1,6 +1,6 @@
 # Whimper
 
-Local, privacy-first voice-to-text transcription for macOS. An open-source alternative to SuperWhisper that runs entirely on-device.
+Local, privacy-first voice-to-text transcription for macOS and Linux. An open-source alternative to SuperWhisper that runs entirely on-device.
 
 Seriously got tired of not owning the software that most of my thoughts were streaming through.
 
@@ -8,17 +8,36 @@ Seriously got tired of not owning the software that most of my thoughts were str
 
 1. **First launch** — downloads the Parakeet TDT 0.6B ASR model (~662 MB) to `~/.whimper/models/`
 2. **Background** — the app hides after model load, a pre-roll mic keeps a 300ms audio buffer ready
-3. **Option+Space** — starts recording with a translucent overlay; pre-roll captures the start of your speech
-4. **Option+Space again** — stops recording, transcribes, and pastes the text into the previously focused app
+3. **Hotkey** (Option+Space on macOS, Alt+Space on Linux) — starts recording with a translucent overlay; pre-roll captures the start of your speech
+4. **Hotkey again** — stops recording, transcribes, and pastes the text into the focused app (Cmd+V on macOS, Ctrl+V on Linux)
 5. **ESC** — cancels recording without pasting
 
 All speech processing happens locally via ONNX Runtime. No network calls after the initial model download.
 
 ## Requirements
 
+### macOS
 - macOS (Apple Silicon or Intel)
 - Microphone permission
 - Accessibility permission (for paste via simulated Cmd+V)
+
+### Linux
+- A microphone (cpal uses ALSA; routes through PipeWire on most modern setups)
+- Membership in the `input` group, so the app can read the keyboard for the global hotkey:
+  ```bash
+  sudo usermod -aG input $USER   # then log out and back in
+  ```
+  Wayland doesn't let apps grab global shortcuts, so the Alt+Space hotkey is detected by reading `/dev/input/event*` directly via evdev.
+- **Wayland (Hyprland/Sway/wlroots):** key injection uses the `zwp_virtual_keyboard` protocol, which these compositors support out of the box. To stop the recording overlay from stealing keyboard focus (which would send the paste to the overlay instead of your app), add these rules to your Hyprland config:
+  ```
+  windowrulev2 = noinitialfocus, title:^(whimper-overlay)$
+  windowrulev2 = nofocus, title:^(whimper-overlay)$
+  ```
+- Build-time system packages (Arch): `sudo pacman -S webkit2gtk-4.1 gtk3 librsvg alsa-lib base-devel`
+- Speech inference runs on CPU (ONNX Runtime CPU provider); a GPU is not used.
+- **NVIDIA + Wayland:** WebKitGTK's DMABUF renderer crashes the GTK backend (`Error 71 (Protocol error) dispatching to Wayland display`). whimper sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` automatically at startup on Linux, so no manual workaround is needed. (Don't run the app with `sudo` — root has no Wayland auth and GTK won't initialize; the `input` group above is what grants hotkey access.)
+
+> Note: the Alt+Space keystroke isn't consumed — it still reaches the focused app. Most apps ignore Alt+Space, but pick a different chord if it conflicts.
 
 ## Tech stack
 
@@ -30,8 +49,8 @@ All speech processing happens locally via ONNX Runtime. No network calls after t
 | Styling | Tailwind CSS |
 | ASR | NVIDIA Parakeet TDT 0.6B (ONNX) |
 | Audio | cpal + rubato (16kHz resampling) |
-| Hotkey | tauri-plugin-global-shortcut |
-| Paste | cocoa + objc + core-graphics (NSPasteboard + CGEvent) |
+| Hotkey | macOS: tauri-plugin-global-shortcut · Linux: evdev (`/dev/input`) |
+| Paste | macOS: cocoa + core-graphics (NSPasteboard + CGEvent) · Linux: arboard + enigo (clipboard + Ctrl+V) |
 
 ## Making Parakeet TDT work
 
@@ -76,8 +95,12 @@ bun install
 # Run in development mode
 bun tauri dev
 
-# Build release
+# Build release (binary + bundles in src-tauri/target/release/)
 bun tauri build
+
+# On Linux, building the AppImage needs extract-and-run (linuxdeploy and
+# appimagetool are AppImages and FUSE-mounting them often fails):
+APPIMAGE_EXTRACT_AND_RUN=1 bun tauri build
 
 # Run tests
 bun test                          # frontend (vitest)
@@ -98,7 +121,8 @@ src-tauri/
       preprocess.rs   # Mel spectrogram feature extraction
       vad.rs          # Silero VAD (voice activity detection)
     download/         # Model download with progress + resume
-    paste/            # macOS pasteboard + simulated Cmd+V
+    paste/            # Clipboard + simulated paste (macOS Cmd+V / Linux Ctrl+V)
+    input/            # Linux-only: evdev global-hotkey listener
     state.rs          # Shared app state
     lib.rs            # Tauri commands, hotkey handler, app setup
 ```

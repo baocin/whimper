@@ -33,12 +33,6 @@ rustfft = "6"
 # HTTP client for model download
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 
-# macOS APIs (pasteboard, CGEvent, NSWorkspace)
-cocoa = "0.25"
-objc = "0.2"
-core-graphics = "0.24"
-core-foundation = "0.9"
-
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -62,6 +56,22 @@ sysinfo = "0.32"
 
 # Directories
 dirs = "5"
+
+# macOS APIs (pasteboard, CGEvent, NSWorkspace)
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.25"
+objc = "0.2"
+core-graphics = "0.24"
+core-foundation = "0.9"
+
+# Linux paste + global hotkey
+[target.'cfg(target_os = "linux")'.dependencies]
+# Clipboard (text only; wayland-data-control enables native Wayland support)
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+# Key simulation for Ctrl+V (wayland = zwp_virtual_keyboard backend, x11rb fallback)
+enigo = { version = "0.6", features = ["wayland"] }
+# Raw /dev/input reading for the global hotkey (Wayland can't grab global keys)
+evdev = "0.13"
 
 [features]
 default = ["custom-protocol"]

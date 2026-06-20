@@ -1,4 +1,4 @@
-name: Build macOS App
+name: Build
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  macos:
     runs-on: macos-latest
 
     steps:
@@ -32,5 +32,49 @@ jobs:
       - name: Upload .app bundle
         uses: actions/upload-artifact@v4
         with:
-          name: Whimper.app
+          name: Whimper-macos
           path: src-tauri/target/release/bundle/macos/Whimper.app
+
+  linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libasound2-dev \
+            libayatana-appindicator3-dev \
+            build-essential
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install frontend dependencies
+        run: bun install
+
+      - name: Build Tauri app
+        # APPIMAGE_EXTRACT_AND_RUN: linuxdeploy/appimagetool are themselves
+        # AppImages; extract-and-run avoids FUSE, which isn't available on CI.
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: bun run tauri build
+
+      - name: Upload Linux bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: Whimper-linux
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/appimage/*.AppImage

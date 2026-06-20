@@ -1,7 +1,12 @@
-//! macOS paste mechanism
+//! Paste mechanism (per-platform).
 //!
-//! Saves transcript to NSPasteboard, reactivates the previous app,
+//! macOS: saves transcript to NSPasteboard, reactivates the previous app,
 //! and simulates Cmd+V via CGEvent.
+//!
+//! Linux: writes to the clipboard via `arboard` (Wayland/X11) and simulates
+//! Ctrl+V via `enigo`. There is no portable "frontmost app" concept on
+//! Wayland, so focus save/restore is a no-op — the user's window stays
+//! focused because the app runs in the background.
 
 use anyhow::{anyhow, Result};
 
@@ -19,6 +24,13 @@ use objc::{msg_send, sel, sel_impl, class};
 /// Key code for 'V' on macOS
 #[cfg(target_os = "macos")]
 const KEY_V: CGKeyCode = 9;
+
+/// Process-lifetime clipboard handle. On Wayland the clipboard contents are
+/// only served while the owning client is alive, so we keep a single instance
+/// around for the life of the app rather than creating/dropping per paste.
+#[cfg(target_os = "linux")]
+static CLIPBOARD: std::sync::OnceLock<std::sync::Mutex<arboard::Clipboard>> =
+    std::sync::OnceLock::new();
 
 /// Get the PID of the frontmost application
 #[cfg(target_os = "macos")]
@@ -56,7 +68,27 @@ pub fn write_to_pasteboard(text: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Write text to the clipboard (Linux: arboard, Wayland/X11).
+#[cfg(target_os = "linux")]
+pub fn write_to_pasteboard(text: &str) -> Result<()> {
+    let cb = match CLIPBOARD.get() {
+        Some(cb) => cb,
+        None => {
+            let clip = arboard::Clipboard::new()
+                .map_err(|e| anyhow!("Failed to init clipboard: {e}"))?;
+            // Ignore the Err if another thread won the race; either way get() succeeds after.
+            let _ = CLIPBOARD.set(std::sync::Mutex::new(clip));
+            CLIPBOARD.get().expect("clipboard set above")
+        }
+    };
+    cb.lock()
+        .map_err(|e| anyhow!("Clipboard lock poisoned: {e}"))?
+        .set_text(text.to_owned())
+        .map_err(|e| anyhow!("Failed to set clipboard text: {e}"))?;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn write_to_pasteboard(_text: &str) -> Result<()> {
     Err(anyhow!("Pasteboard not supported on this platform"))
 }
@@ -80,9 +112,11 @@ pub fn activate_app(pid: i32) -> Result<()> {
     Ok(())
 }
 
+/// No-op off macOS: there is no portable way to raise another app's window on
+/// Wayland, and we don't need to — the user's window keeps focus.
 #[cfg(not(target_os = "macos"))]
 pub fn activate_app(_pid: i32) -> Result<()> {
-    Err(anyhow!("App activation not supported on this platform"))
+    Ok(())
 }
 
 /// Simulate Cmd+V keystroke to paste from clipboard
@@ -105,7 +139,31 @@ pub fn simulate_paste() -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Simulate Ctrl+V keystroke to paste from clipboard (Linux: enigo).
+#[cfg(target_os = "linux")]
+pub fn simulate_paste() -> Result<()> {
+    use enigo::{
+        Direction::{Click, Press, Release},
+        Enigo, Key, Keyboard, Settings,
+    };
+
+    let mut enigo =
+        Enigo::new(&Settings::default()).map_err(|e| anyhow!("Failed to init enigo: {e}"))?;
+
+    enigo
+        .key(Key::Control, Press)
+        .map_err(|e| anyhow!("Ctrl press failed: {e}"))?;
+    enigo
+        .key(Key::Unicode('v'), Click)
+        .map_err(|e| anyhow!("V click failed: {e}"))?;
+    enigo
+        .key(Key::Control, Release)
+        .map_err(|e| anyhow!("Ctrl release failed: {e}"))?;
+
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn simulate_paste() -> Result<()> {
     Err(anyhow!("Paste simulation not supported on this platform"))
 }
@@ -136,7 +194,14 @@ pub fn check_accessibility() -> bool {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// No macOS-style trust prompt on Linux; key injection is governed by the
+/// compositor (Wayland virtual-keyboard) and `input`-group access for evdev.
+#[cfg(target_os = "linux")]
+pub fn check_accessibility() -> bool {
+    true
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn check_accessibility() -> bool {
     false
 }

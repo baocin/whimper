@@ -1,13 +1,15 @@
 mod asr;
 mod audio;
 mod download;
+#[cfg(target_os = "linux")]
+mod input;
 mod paste;
 mod state;
 
 use state::{AppState, ModelStatus, RecordingState};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+use tauri_plugin_global_shortcut::ShortcutState;
 
 // ─��� Tauri Commands ────────────────────────────────────────────────────────
 
@@ -166,7 +168,9 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                     "overlay",
                     tauri::WebviewUrl::App("/overlay".into()),
                 )
-                .title("")
+                // Title is invisible (decorations off) but lets Hyprland match a
+                // no-focus window rule so the overlay doesn't steal keyboard focus.
+                .title("whimper-overlay")
                 .inner_size(400.0, 80.0)
                 .decorations(false)
                 .transparent(true)
@@ -295,6 +299,15 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
 // ── App Entry Point ──────────────────────────────────────────────────────
 
 pub fn run() {
+    // NVIDIA + Wayland: WebKitGTK's DMABUF renderer crashes the GTK backend with
+    // "Error 71 (Protocol error) dispatching to Wayland display". Disabling it
+    // forces a software/GL path that renders correctly. Must be set before the
+    // Tauri/WebKit runtime initializes.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -326,8 +339,23 @@ pub fn run() {
             hide_main_window,
         ])
         .setup(move |app| {
-            let shortcut: Shortcut = "Alt+Space".parse().unwrap();
-            app.global_shortcut().register(shortcut)?;
+            // Hotkey: macOS uses the Tauri global-shortcut plugin. On Wayland
+            // that can't grab global keys, so Linux reads evdev directly.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
+                let shortcut: Shortcut = "Alt+Space".parse().unwrap();
+                app.global_shortcut().register(shortcut)?;
+            }
+
+            #[cfg(target_os = "linux")]
+            {
+                let app_for_hotkey = app.handle().clone();
+                let state_for_hotkey = app_state.clone();
+                input::start_evdev_listener(move || {
+                    handle_hotkey(&app_for_hotkey, &state_for_hotkey);
+                });
+            }
 
             // Auto-load model if already downloaded
             let app_handle2 = app.handle().clone();
