@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import DownloadScreen from "./components/DownloadScreen";
 import HotkeyWarning from "./components/HotkeyWarning";
 import Overlay from "./components/Overlay";
-import type { ContinuousPastedEvent, HotkeyStatus, ModelStatus } from "./types";
+import type { ContinuousPastedEvent, HotkeyStatus } from "./types";
 
 function App() {
   if (window.location.pathname === "/overlay") {
@@ -15,9 +14,6 @@ function App() {
 }
 
 function MainWindow() {
-  const [modelStatus, setModelStatus] = useState<ModelStatus>({
-    kind: "not_downloaded",
-  });
   const [hotkeyStatus, setHotkeyStatus] = useState<HotkeyStatus | null>(null);
   const [continuousActive, setContinuousActive] = useState(false);
   const [lastPaste, setLastPaste] = useState<ContinuousPastedEvent | null>(
@@ -31,9 +27,6 @@ function MainWindow() {
   }, []);
 
   useEffect(() => {
-    invoke<ModelStatus>("check_model_status")
-      .then(setModelStatus)
-      .catch(() => {});
     invoke<boolean>("is_continuous_active")
       .then(setContinuousActive)
       .catch(() => {});
@@ -41,9 +34,6 @@ function MainWindow() {
   }, [recheckHotkey]);
 
   useEffect(() => {
-    const unModel = listen("model-ready", () =>
-      setModelStatus({ kind: "ready" }),
-    );
     const unHotkey = listen<HotkeyStatus>("hotkey-status", (e) =>
       setHotkeyStatus(e.payload),
     );
@@ -58,7 +48,6 @@ function MainWindow() {
       },
     );
     return () => {
-      unModel.then((fn) => fn());
       unHotkey.then((fn) => fn());
       unContState.then((fn) => fn());
       unContPaste.then((fn) => fn());
@@ -66,14 +55,10 @@ function MainWindow() {
   }, []);
 
   useEffect(() => {
-    if (
-      modelStatus.kind === "ready" &&
-      hotkeyStatus === "available" &&
-      !continuousActive
-    ) {
+    if (hotkeyStatus === "available" && !continuousActive) {
       invoke("hide_main_window");
     }
-  }, [modelStatus, hotkeyStatus, continuousActive]);
+  }, [hotkeyStatus, continuousActive]);
 
   const toggleContinuous = () => {
     if (continuousActive) {
@@ -88,9 +73,15 @@ function MainWindow() {
       <HotkeyWarning status={hotkeyStatus} onRecheck={recheckHotkey} />
     ) : null;
 
-  const modeControls =
-    modelStatus.kind === "ready" ? (
-      <div className="mt-6 flex flex-col items-center gap-3">
+  return (
+    <div className="min-h-screen bg-zinc-900 flex flex-col items-center justify-center p-6">
+      <h1 className="text-2xl font-bold text-white mb-1">Whimper</h1>
+      <p className="text-gray-400 mb-6 text-sm">
+        Local voice-to-text transcription
+      </p>
+      {banner}
+
+      <div className="flex flex-col items-center gap-3">
         <button
           onClick={toggleContinuous}
           className={`rounded-lg px-6 py-2 text-sm font-medium transition-colors ${
@@ -112,16 +103,6 @@ function MainWindow() {
           </p>
         )}
       </div>
-    ) : null;
-
-  return (
-    <div className="min-h-screen bg-zinc-900 flex flex-col items-center justify-center p-6">
-      <DownloadScreen
-        modelStatus={modelStatus}
-        onStatusChange={setModelStatus}
-        banner={banner}
-      />
-      {modeControls}
     </div>
   );
 }
