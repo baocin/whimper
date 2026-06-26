@@ -1,5 +1,6 @@
 mod asr;
 mod audio;
+mod continuous;
 mod download;
 #[cfg(target_os = "linux")]
 mod input;
@@ -12,40 +13,26 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::ShortcutState;
 
-// ─��� Tauri Commands ────────────────────────────────────────────────────────
+// ── Tauri Commands ────────────────────────────────────────────────────────
 
 #[tauri::command]
-async fn check_model_status(
-    state: tauri::State<'_, Arc<AppState>>,
-) -> Result<ModelStatus, String> {
-    if download::is_model_downloaded() {
-        if let Ok(guard) = state.asr.lock() {
-            if guard.is_some() {
-                return Ok(ModelStatus::Ready);
-            }
-        }
-        return Ok(ModelStatus::Downloaded);
+async fn check_model_status(state: tauri::State<'_, Arc<AppState>>) -> Result<ModelStatus, String> {
+    // Clone the client out of the lock so we can await without holding it
+    let client = {
+        let guard = state.asr.lock().map_err(|e| e.to_string())?;
+        guard.clone()
+    };
+
+    match client {
+        Some(c) => match c.is_ready().await {
+            Ok(true) => Ok(ModelStatus::Ready),
+            Ok(false) => Ok(ModelStatus::Loading),
+            Err(e) => Ok(ModelStatus::Error {
+                message: format!("ASR server check failed: {}", e),
+            }),
+        },
+        None => Ok(ModelStatus::NotDownloaded),
     }
-    Ok(ModelStatus::NotDownloaded)
-}
-
-#[tauri::command]
-async fn start_download(
-    app_handle: AppHandle,
-    state: tauri::State<'_, Arc<AppState>>,
-) -> Result<(), String> {
-    state.set_cancel_download(false);
-    let state_ref = state.inner().clone();
-    let app = app_handle.clone();
-
-    tokio::spawn(async move {
-        if let Err(e) = download::download_model(app.clone(), &state_ref).await {
-            tracing::error!("Download failed: {}", e);
-            let _ = app.emit("download-error", e.to_string());
-        }
-    });
-
-    Ok(())
 }
 
 #[tauri::command]
@@ -56,26 +43,43 @@ async fn cancel_download(state: tauri::State<'_, Arc<AppState>>) -> Result<(), S
 
 #[tauri::command]
 async fn load_model(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
-    let model_dir = state::model_dir();
-    let dir_str = model_dir.to_string_lossy().to_string();
-
     *state.model_status.lock().await = ModelStatus::Loading;
 
-    let asr_arc = state.asr.clone();
+    // Create the HTTP client and test server readiness
+    let url = state.asr_server_url.clone();
+    let client = asr::HttpAsrClient::new(url);
 
-    tokio::task::spawn_blocking(move || {
-        let asr = asr::ParakeetAsr::new();
-        asr.load_model(&dir_str).map_err(|e| e.to_string())?;
-        if let Ok(mut guard) = asr_arc.lock() {
-            *guard = Some(asr);
+    // Wait for server to be ready (up to 30 seconds)
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut last_ready = false;
+    while std::time::Instant::now() < deadline {
+        match client.is_ready().await {
+            Ok(true) => {
+                last_ready = true;
+                break;
+            }
+            Ok(false) => {
+                tracing::info!("Waiting for ASR server to be ready...");
+            }
+            Err(e) => {
+                tracing::warn!("ASR server not reachable yet: {}", e);
+            }
         }
-        Ok::<(), String>(())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e: String| e)?;
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    }
+
+    if !last_ready {
+        return Err("ASR server did not become ready within 30 seconds. Is the model-server-asr container running?".into());
+    }
+
+    // Store client
+    {
+        let mut guard = state.asr.lock().map_err(|e| e.to_string())?;
+        *guard = Some(client);
+    }
 
     *state.model_status.lock().await = ModelStatus::Ready;
+    tracing::info!("ASR server is ready via HTTP client");
 
     // Start background pre-roll mic
     start_preroll_mic(&state);
@@ -125,6 +129,46 @@ async fn check_hotkey_status(
     Ok(state.hotkey_status.lock().map(|g| *g).unwrap_or_default())
 }
 
+// ── Continuous Listening Commands ─────────────────────────────────────────
+
+#[tauri::command]
+async fn start_continuous(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
+    // Get the ASR client
+    let client = {
+        let guard = state.asr.lock().map_err(|e| e.to_string())?;
+        guard
+            .clone()
+            .ok_or_else(|| "ASR client not initialized".to_string())?
+    };
+
+    let sink = state.continuous_sink.clone();
+    let pid = *state.previous_app_pid.lock().await;
+
+    let _handle = continuous::start(client, sink, pid);
+    *state.continuous_handle.lock().map_err(|e| e.to_string())? = Some(_handle);
+    *state.continuous_active.lock().await = true;
+
+    tracing::info!("Continuous listening started");
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_continuous(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
+    if let Ok(mut handle) = state.continuous_handle.lock() {
+        if let Some(h) = handle.take() {
+            h.stop();
+        }
+    }
+    *state.continuous_active.lock().await = false;
+    tracing::info!("Continuous listening stopped");
+    Ok(())
+}
+
+#[tauri::command]
+async fn is_continuous_active(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
+    Ok(*state.continuous_active.lock().await)
+}
+
 // ── Pre-roll Mic ─────────────────────────────────────────────────────────
 
 /// Start (or restart) the background pre-roll mic that fills the ring buffer.
@@ -164,18 +208,21 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
 
         match *recording {
             RecordingState::Idle => {
-                // Check model is ready
-                match state.asr.lock() {
-                    Ok(guard) => {
-                        if guard.is_none() {
-                            tracing::warn!("Model not loaded, ignoring hotkey");
+                // Check ASR server is ready (not blocking — quick clone + drop)
+                let client_ready = {
+                    let guard = state.asr.lock();
+                    match guard {
+                        Ok(g) => g.is_some(),
+                        Err(_) => {
+                            tracing::error!("ASR lock poisoned, ignoring hotkey");
                             return;
                         }
                     }
-                    Err(e) => {
-                        tracing::error!("ASR lock poisoned, ignoring hotkey: {}", e);
-                        return;
-                    }
+                };
+
+                if !client_ready {
+                    tracing::warn!("ASR client not initialized, ignoring hotkey");
+                    return;
                 }
 
                 // Save frontmost app PID before we steal focus
@@ -288,34 +335,38 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                 // Fallback duration if transcribe never runs (empty audio / error).
                 let fallback_duration_ms = (audio_samples.len() as f64 / 16.0) as u64;
 
-                // Batch-transcribe on blocking thread. Capture the full result
-                // (text + timings) so the durable log gets untruncated text and RTF.
-                let asr_arc = state.asr.clone();
-                let (transcript, processing_time_ms, audio_duration_ms) = if !audio_samples
-                    .is_empty()
-                {
-                    match tokio::task::spawn_blocking(move || {
-                        let guard = asr_arc.lock().map_err(|e| format!("ASR lock: {}", e))?;
-                        let asr = guard
-                            .as_ref()
-                            .ok_or_else(|| "Model not loaded".to_string())?;
-                        asr.transcribe(&audio_samples).map_err(|e| e.to_string())
-                    })
-                    .await
-                    {
-                        Ok(Ok(r)) => (r.text, r.processing_time_ms, r.audio_duration_ms),
-                        Ok(Err(e)) => {
-                            tracing::error!("Transcription failed: {}", e);
-                            (String::new(), 0, fallback_duration_ms)
-                        }
+                // Transcribe via HTTP — clone the client out of the std::sync::Mutex
+                // so we don't hold the lock across an await point.
+                let client_clone = {
+                    let guard = state.asr.lock();
+                    match guard {
+                        Ok(g) => g.clone(),
                         Err(e) => {
-                            tracing::error!("Transcription task panicked: {}", e);
-                            (String::new(), 0, fallback_duration_ms)
+                            tracing::error!("ASR lock poisoned: {}", e);
+                            None
                         }
                     }
-                } else {
-                    (String::new(), 0, fallback_duration_ms)
                 };
+
+                let (transcript, processing_time_ms, audio_duration_ms) =
+                    if let Some(client) = client_clone {
+                        if !audio_samples.is_empty() {
+                            // Convert float samples to i16 WAV bytes
+                            let wav_bytes = audio_samples_to_wav(&audio_samples);
+
+                            match client.transcribe(&wav_bytes, "whimper_recording.wav").await {
+                                Ok(r) => (r.text, r.processing_time_ms, r.audio_duration_ms),
+                                Err(e) => {
+                                    tracing::error!("HTTP transcription failed: {}", e);
+                                    (String::new(), 0, fallback_duration_ms)
+                                }
+                            }
+                        } else {
+                            (String::new(), 0, fallback_duration_ms)
+                        }
+                    } else {
+                        (String::new(), 0, fallback_duration_ms)
+                    };
 
                 // tracing stays truncated for readability; the JSONL log below
                 // holds the full text — don't double-truncate.
@@ -365,6 +416,30 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
     });
 }
 
+/// Convert Vec<f32> audio samples to a WAV byte buffer (mono, 16kHz, 16-bit PCM).
+fn audio_samples_to_wav(samples: &[f32]) -> Vec<u8> {
+    use hound::WavWriter;
+    use std::io::Cursor;
+
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: 16000,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+
+    let mut cursor = Cursor::new(Vec::new());
+    {
+        let mut writer = WavWriter::new(&mut cursor, spec).expect("Failed to create WAV writer");
+        for &s in samples {
+            let sample = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+            writer.write_sample(sample).ok();
+        }
+        writer.finalize().ok();
+    }
+    cursor.into_inner()
+}
+
 // ── App Entry Point ──────────────────────────────────────────────────────
 
 pub fn run() {
@@ -398,7 +473,11 @@ pub fn run() {
         tracing::error!("self-heal re-exec failed, continuing without it: {}", e);
     }
 
-    let app_state = Arc::new(AppState::new());
+    // ASR server URL: Docker internal or localhost for dev
+    let asr_server_url =
+        std::env::var("WHIMPER_ASR_URL").unwrap_or_else(|_| "http://localhost:9360".to_string());
+
+    let app_state = Arc::new(AppState::new(asr_server_url));
 
     let state_for_shortcut = app_state.clone();
 
@@ -415,12 +494,14 @@ pub fn run() {
         .manage(app_state.clone())
         .invoke_handler(tauri::generate_handler![
             check_model_status,
-            start_download,
-            cancel_download,
             load_model,
+            cancel_download,
             cancel_recording,
             hide_main_window,
             check_hotkey_status,
+            start_continuous,
+            stop_continuous,
+            is_continuous_active,
         ])
         .setup(move |app| {
             // Hotkey: macOS uses the Tauri global-shortcut plugin. On Wayland
@@ -454,43 +535,43 @@ pub fn run() {
                 }
             }
 
-            // Auto-load model if already downloaded
+            // Auto-connect to ASR server at startup
             let app_handle2 = app.handle().clone();
             let state_for_load = app_state.clone();
-            if download::is_model_downloaded() {
-                tauri::async_runtime::spawn(async move {
-                    let model_dir = state::model_dir();
-                    let dir_str = model_dir.to_string_lossy().to_string();
-                    let asr_arc = state_for_load.asr.clone();
+            let asr_url = app_state.asr_server_url.clone();
 
-                    let result = tokio::task::spawn_blocking(move || {
-                        let asr = asr::ParakeetAsr::new();
-                        asr.load_model(&dir_str)?;
-                        Ok::<_, anyhow::Error>(asr)
-                    })
-                    .await;
+            tauri::async_runtime::spawn(async move {
+                tracing::info!("Connecting to ASR server at {}", asr_url);
+                let client = asr::HttpAsrClient::new(asr_url);
 
-                    match result {
-                        Ok(Ok(asr)) => {
-                            if let Ok(mut guard) = asr_arc.lock() {
-                                *guard = Some(asr);
-                            }
-                            *state_for_load.model_status.lock().await = ModelStatus::Ready;
-                            let _ = app_handle2.emit("model-ready", ());
-                            tracing::info!("Parakeet TDT model auto-loaded successfully");
-
-                            // Start background pre-roll mic
-                            start_preroll_mic(&state_for_load);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+                let mut connected = false;
+                while std::time::Instant::now() < deadline {
+                    match client.is_ready().await {
+                        Ok(true) => {
+                            connected = true;
+                            break;
                         }
-                        Ok(Err(e)) => {
-                            tracing::error!("Failed to auto-load model: {}", e);
-                        }
-                        Err(e) => {
-                            tracing::error!("Model loading task panicked: {}", e);
+                        _ => {
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                         }
                     }
-                });
-            }
+                }
+
+                if connected {
+                    if let Ok(mut guard) = state_for_load.asr.lock() {
+                        *guard = Some(client);
+                    }
+                    *state_for_load.model_status.lock().await = ModelStatus::Ready;
+                    let _ = app_handle2.emit("model-ready", ());
+                    tracing::info!("Auto-connected to ASR server successfully");
+
+                    // Start background pre-roll mic
+                    start_preroll_mic(&state_for_load);
+                } else {
+                    tracing::warn!("ASR server not available at startup (will retry on demand)");
+                }
+            });
 
             Ok(())
         })
@@ -509,8 +590,8 @@ mod tests {
     #[test]
     fn test_tauri_conf_is_valid_json() {
         let conf_str = include_str!("../tauri.conf.json");
-        let parsed: serde_json::Value = serde_json::from_str(conf_str)
-            .expect("tauri.conf.json is not valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(conf_str).expect("tauri.conf.json is not valid JSON");
 
         assert!(parsed.get("productName").is_some(), "missing productName");
         assert!(parsed.get("identifier").is_some(), "missing identifier");
@@ -535,7 +616,7 @@ mod tests {
 
     #[test]
     fn test_app_state_initial_values() {
-        let state = AppState::new();
+        let state = AppState::new("http://localhost:9360".into());
         assert!(!state.is_download_cancelled());
         assert!(state.asr.lock().unwrap().is_none());
     }

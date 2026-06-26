@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 
-use crate::asr::ParakeetAsr;
+use crate::asr::HttpAsrClient;
 use crate::audio::pipeline::{PipelineHandle, PreRollBuffer};
+use crate::continuous::{AudioSink, ContinuousHandle};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
@@ -12,10 +13,7 @@ pub enum ModelStatus {
     #[serde(rename = "not_downloaded")]
     NotDownloaded,
     #[serde(rename = "downloading")]
-    Downloading {
-        progress: f64,
-        speed_mbps: f64,
-    },
+    Downloading { progress: f64, speed_mbps: f64 },
     #[serde(rename = "downloaded")]
     Downloaded,
     #[serde(rename = "loading")]
@@ -60,7 +58,9 @@ impl Default for HotkeyStatus {
 pub struct AppState {
     pub model_status: Mutex<ModelStatus>,
     pub recording_state: Mutex<RecordingState>,
-    pub asr: Arc<std::sync::Mutex<Option<ParakeetAsr>>>,
+    /// HTTP client for the remote ASR server (model-server-asr container).
+    pub asr: std::sync::Mutex<Option<HttpAsrClient>>,
+    pub asr_server_url: String,
     pub cancel_download: AtomicBool,
     /// PID of the app that was frontmost before we opened the overlay
     pub previous_app_pid: Mutex<Option<i32>>,
@@ -72,20 +72,30 @@ pub struct AppState {
     pub preroll_mic: std::sync::Mutex<Option<PipelineHandle>>,
     /// Whether the global hotkey is usable (Linux: evdev keyboard readable).
     pub hotkey_status: std::sync::Mutex<HotkeyStatus>,
+    /// Continuous listening: shared audio sink (mic callback pushes here)
+    pub continuous_sink: Arc<AudioSink>,
+    /// Continuous listening: handle to the background task
+    pub continuous_handle: std::sync::Mutex<Option<ContinuousHandle>>,
+    /// Whether continuous listening is active (tokio Mutex for async access)
+    pub continuous_active: tokio::sync::Mutex<bool>,
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    pub fn new(asr_server_url: String) -> Self {
         Self {
             model_status: Mutex::new(ModelStatus::NotDownloaded),
             recording_state: Mutex::new(RecordingState::Idle),
-            asr: Arc::new(std::sync::Mutex::new(None)),
+            asr: std::sync::Mutex::new(None),
+            asr_server_url,
             cancel_download: AtomicBool::new(false),
             previous_app_pid: Mutex::new(None),
             mic_stream: std::sync::Mutex::new(None),
             preroll_buffer: Arc::new(PreRollBuffer::new()),
             preroll_mic: std::sync::Mutex::new(None),
             hotkey_status: std::sync::Mutex::new(HotkeyStatus::default()),
+            continuous_sink: AudioSink::new(),
+            continuous_handle: std::sync::Mutex::new(None),
+            continuous_active: tokio::sync::Mutex::new(false),
         }
     }
 
@@ -156,7 +166,7 @@ mod tests {
 
     #[test]
     fn test_app_state_cancel_download() {
-        let state = AppState::new();
+        let state = AppState::new("http://localhost:9360".into());
         assert!(!state.is_download_cancelled());
         state.set_cancel_download(true);
         assert!(state.is_download_cancelled());
