@@ -190,7 +190,8 @@ async fn is_continuous_active(state: tauri::State<'_, Arc<AppState>>) -> Result<
 /// Start (or restart) the background pre-roll mic that fills the ring buffer.
 fn start_preroll_mic(state: &Arc<AppState>) {
     let buffer = Arc::clone(&state.preroll_buffer);
-    match audio::pipeline::start_preroll(buffer) {
+    let sink = Some(state.continuous_sink.clone());
+    match audio::pipeline::start_preroll(buffer, sink) {
         Ok(handle) => {
             if let Ok(mut guard) = state.preroll_mic.lock() {
                 *guard = Some(handle);

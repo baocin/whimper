@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use crate::audio::microphone::{self, MicStream};
+use crate::continuous::AudioSink;
 
 /// 300ms of 16kHz audio
 const PREROLL_CAPACITY: usize = 4800;
@@ -97,11 +98,19 @@ impl Drop for PipelineHandle {
 }
 
 /// Start a background pre-roll mic that fills the given ring buffer.
-pub fn start_preroll(buffer: Arc<PreRollBuffer>) -> Result<PipelineHandle> {
+/// If `sink` is provided, samples are also pushed to the continuous sink
+/// (so continuous mode always has audio flowing without a second mic device).
+pub fn start_preroll(
+    buffer: Arc<PreRollBuffer>,
+    sink: Option<Arc<AudioSink>>,
+) -> Result<PipelineHandle> {
     let accumulator = Arc::new(Mutex::new(Vec::<f32>::new()));
 
     let stream = microphone::start_capture(Box::new(move |samples: &[f32]| {
         buffer.push(samples);
+        if let Some(ref s) = sink {
+            s.push(samples);
+        }
     }))?;
 
     tracing::info!(
