@@ -91,6 +91,43 @@ fn urlencoding(s: &str) -> String {
         .replace('?', "%3F")
 }
 
+/// Process a transcription result: paste on trigger, accumulate otherwise.
+/// Shared between the chunk path and the flush-on-silence path.
+async fn handle_transcription(
+    _asr: &HttpAsrClient,
+    app: &Option<AppHandle>,
+    utterance_text: &mut String,
+    previous_pid: Option<i32>,
+    text: String,
+) {
+    if text.is_empty() {
+        return;
+    }
+    if has_trigger(&text) {
+        let full = if utterance_text.is_empty() {
+            text
+        } else {
+            format!("{}. {}", utterance_text, text)
+        };
+        let word_count = full.split_whitespace().count();
+        tracing::info!("continuous: paste trigger → pasting {} chars", full.len());
+        let _ = paste::paste_text(&full, previous_pid);
+        utterance_text.clear();
+        if let Some(ref a) = app {
+            let _ = a.emit(
+                "continuous-pasted",
+                serde_json::json!({"chars": full.len(), "words": word_count}),
+            );
+            show_paste_feedback(a, "continuous", &format!("Pasted {} words", word_count));
+        }
+    } else {
+        if !utterance_text.is_empty() {
+            utterance_text.push(' ');
+        }
+        utterance_text.push_str(&text);
+    }
+}
+
 pub fn start(
     asr: HttpAsrClient,
     sink: Arc<AudioSink>,
@@ -145,6 +182,12 @@ pub fn start(
 
             if rms < SILENCE_THRESHOLD {
                 silent_count += 1;
+                // Flush partial buffer on first silence after audio (catches short utterances)
+                if silent_count == 1 && !utterance_buf.is_empty() && !in_silence {
+                    let chunk: Vec<f32> = utterance_buf.drain(..).collect();
+                    let text = transcribe_chunk(&asr, &chunk).await;
+                    handle_transcription(&asr, &app, &mut utterance_text, previous_pid, text).await;
+                }
                 if !in_silence && silent_count >= SILENT_CHUNK_LIMIT {
                     tracing::info!(
                         "continuous: silence gap ({} silent chunks), resetting",
@@ -161,41 +204,7 @@ pub fn start(
                 if utterance_buf.len() >= CHUNK_SAMPLES {
                     let chunk: Vec<f32> = utterance_buf.drain(..CHUNK_SAMPLES).collect();
                     let text = transcribe_chunk(&asr, &chunk).await;
-                    if !text.is_empty() {
-                        if has_trigger(&text) {
-                            let full = if utterance_text.is_empty() {
-                                text.clone()
-                            } else {
-                                format!("{}. {}", utterance_text, text)
-                            };
-                            let word_count = full.split_whitespace().count();
-                            tracing::info!(
-                                "continuous: paste trigger → pasting {} chars",
-                                full.len()
-                            );
-                            let _ = paste::paste_text(&full, previous_pid);
-                            utterance_text.clear();
-                            if let Some(ref a) = app {
-                                let _ = a.emit(
-                                    "continuous-pasted",
-                                    serde_json::json!({
-                                        "chars": full.len(),
-                                        "words": word_count,
-                                    }),
-                                );
-                                show_paste_feedback(
-                                    a,
-                                    "continuous",
-                                    &format!("Pasted {} words", word_count),
-                                );
-                            }
-                        } else {
-                            if !utterance_text.is_empty() {
-                                utterance_text.push(' ');
-                            }
-                            utterance_text.push_str(&text);
-                        }
-                    }
+                    handle_transcription(&asr, &app, &mut utterance_text, previous_pid, text).await;
                 }
             }
 
@@ -291,6 +300,21 @@ mod tests {
         let wav = audio_to_wav(&input);
         assert!(wav.len() > 44, "should have WAV header + data");
         assert_eq!(&wav[..4], b"RIFF");
+    }
+
+    #[test]
+    fn test_audio_sink_push_drain() {
+        let sink = AudioSink::new();
+        sink.push(&[0.1f32; 16000]); // 1s of audio
+        let buf = sink.buf.lock().unwrap();
+        assert_eq!(buf.len(), 16000);
+    }
+
+    #[test]
+    fn test_urlencoding_basics() {
+        assert_eq!(urlencoding("Pasted 3 words"), "Pasted%203%20words");
+        assert_eq!(urlencoding("a&b?c%"), "a%26b%3Fc%25");
+        assert_eq!(urlencoding("hello"), "hello");
     }
 
     fn read_recording(path: &str) -> Option<Vec<f32>> {
