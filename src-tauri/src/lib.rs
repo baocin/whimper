@@ -591,6 +591,23 @@ pub fn run() {
 
                     // Start background pre-roll mic
                     start_preroll_mic(&state_for_load);
+
+                    // Auto-start continuous mode if env var is set
+                    if std::env::var_os("WHIMPER_CONTINUOUS").is_some() {
+                        let sink = state_for_load.continuous_sink.clone();
+                        let client = state_for_load.asr.lock().ok().and_then(|g| g.clone());
+                        if let Some(c) = client {
+                            let pid = *state_for_load.previous_app_pid.lock().await;
+                            let h = continuous::start(c, sink, Some(app_handle2.clone()), pid);
+                            if let Ok(mut g) = state_for_load.continuous_handle.lock() {
+                                *g = Some(h);
+                            }
+                            *state_for_load.continuous_active.lock().await = true;
+                            tracing::info!(
+                                "Continuous listening auto-started (WHIMPER_CONTINUOUS=1)"
+                            );
+                        }
+                    }
                 } else {
                     tracing::warn!("ASR server not available at startup (will retry on demand)");
                 }

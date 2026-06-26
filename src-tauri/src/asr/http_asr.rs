@@ -138,12 +138,12 @@ impl HttpAsrClient {
             .await
             .map_err(|e| AsrError::Connection(e.to_string()))?;
 
-        if resp.status() == 503 {
+        let status = resp.status();
+        if status == 503 {
             return Err(AsrError::ServerNotReady("Model not loaded".into()));
         }
 
-        if !resp.status().is_success() {
-            let status = resp.status();
+        if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(AsrError::Server(format!("{}: {}", status, body)));
         }
@@ -151,7 +151,7 @@ impl HttpAsrClient {
         let result: AsrResult = resp
             .json()
             .await
-            .map_err(|e| AsrError::Parse(e.to_string()))?;
+            .map_err(|e| AsrError::Parse(format!("{e} (status {status})")))?;
 
         Ok(result)
     }
