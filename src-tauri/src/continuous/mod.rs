@@ -21,7 +21,43 @@ const TRIGGER_WORDS: &[&str] = &[
 
 fn has_trigger(text: &str) -> bool {
     let lower = text.to_lowercase();
-    TRIGGER_WORDS.iter().any(|&w| lower.contains(w))
+    TRIGGER_WORDS
+        .iter()
+        .any(|&w| word_boundary_match(&lower, w))
+}
+
+/// Check if `word` appears as a whole word (not substring) in `text`.
+fn word_boundary_match(text: &str, word: &str) -> bool {
+    let word_len = word.len();
+    let text_len = text.len();
+    if word_len > text_len {
+        return false;
+    }
+    if text == word {
+        return true;
+    }
+    // Check start
+    if text.starts_with(word) && is_word_boundary_char(text.as_bytes()[word_len]) {
+        return true;
+    }
+    // Check end
+    if text.ends_with(word) && is_word_boundary_char(text.as_bytes()[text_len - word_len - 1]) {
+        return true;
+    }
+    // Check middle
+    if let Some(pos) = text[1..text_len.saturating_sub(1)].find(word) {
+        let real_pos = pos + 1;
+        if is_word_boundary_char(text.as_bytes()[real_pos - 1])
+            && is_word_boundary_char(text.as_bytes()[real_pos + word_len])
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_word_boundary_char(c: u8) -> bool {
+    !c.is_ascii_alphanumeric()
 }
 
 pub struct AudioSink {
@@ -278,15 +314,39 @@ mod tests {
 
     #[test]
     fn test_has_trigger_variants() {
+        // Whole word matches
         assert!(has_trigger("paste"));
         assert!(has_trigger("please paste that"));
+        assert!(has_trigger("paste it now"));
+        assert!(has_trigger("paste."));
+        assert!(has_trigger("I said paste,"));
+        // Phonetic variants (whole word)
         assert!(has_trigger("based on that"));
-        assert!(has_trigger("waste of time"));
+        assert!(has_trigger("a waste of time"));
         assert!(has_trigger("taste test"));
         assert!(has_trigger("paced up and down"));
+        // False positives prevented by word boundary match
+        assert!(!has_trigger("pasteurize")); // substring of "pasteurize"
+        assert!(!has_trigger("space")); // "pace" is substring
+        assert!(!has_trigger("wasted")); // "waste" + 'd' — word-internal
+        assert!(!has_trigger("wasting"));
+        assert!(!has_trigger("tastes good")); // "taste" + 's'
+        assert!(!has_trigger("basement")); // "base" + 'ment'
         assert!(!has_trigger("hello world"));
         assert!(!has_trigger("copy that"));
         assert!(!has_trigger(""));
+    }
+
+    #[test]
+    fn test_word_boundary_match() {
+        assert!(word_boundary_match("paste", "paste"));
+        assert!(word_boundary_match("a paste", "paste"));
+        assert!(word_boundary_match("paste it", "paste"));
+        assert!(word_boundary_match("a paste.", "paste"));
+        assert!(!word_boundary_match("pasteurize", "paste"));
+        assert!(!word_boundary_match("wasted", "waste"));
+        assert!(!word_boundary_match("", "paste"));
+        assert!(!word_boundary_match("x", "paste"));
     }
 
     #[test]
