@@ -21,17 +21,24 @@ use std::time::Duration;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AsrResult {
     pub text: String,
+    #[serde(default)]
     pub words: Vec<AsrWord>,
+    #[serde(default)]
     pub processing_time_ms: u64,
+    #[serde(default)]
     pub audio_duration_ms: u64,
+    #[serde(default)]
     pub rtf: f64,
+    #[serde(default)]
     pub token_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AsrWord {
     pub text: String,
+    #[serde(default)]
     pub start: u64,
+    #[serde(default)]
     pub end: u64,
 }
 
@@ -148,10 +155,19 @@ impl HttpAsrClient {
             return Err(AsrError::Server(format!("{}: {}", status, body)));
         }
 
-        let result: AsrResult = resp
+        // ponytail: read raw JSON first so we can log shape on parse failure
+        let raw: serde_json::Value = resp
             .json()
             .await
             .map_err(|e| AsrError::Parse(format!("{e} (status {status})")))?;
+
+        tracing::debug!("continuous: ASR raw = {}", raw);
+        let result: AsrResult = serde_json::from_value(raw.clone()).map_err(|e| {
+            AsrError::Parse(format!(
+                "{e} — raw body keys: {:?}",
+                raw.as_object().map(|o| o.keys().collect::<Vec<_>>())
+            ))
+        })?;
 
         Ok(result)
     }
