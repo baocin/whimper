@@ -30,9 +30,7 @@ pub struct DownloadProgress {
 /// Check if model files exist on disk
 pub fn is_model_downloaded() -> bool {
     let dir = state::model_dir();
-    MODEL_FILES
-        .iter()
-        .all(|(name, _)| dir.join(name).exists())
+    MODEL_FILES.iter().all(|(name, _)| dir.join(name).exists())
 }
 
 /// Download all model files

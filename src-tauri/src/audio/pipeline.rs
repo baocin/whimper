@@ -104,7 +104,10 @@ pub fn start_preroll(buffer: Arc<PreRollBuffer>) -> Result<PipelineHandle> {
         buffer.push(samples);
     }))?;
 
-    tracing::info!("Pre-roll mic started ({}ms buffer)", PREROLL_CAPACITY * 1000 / 16000);
+    tracing::info!(
+        "Pre-roll mic started ({}ms buffer)",
+        PREROLL_CAPACITY * 1000 / 16000
+    );
 
     Ok(PipelineHandle {
         mic_stream: stream,
@@ -122,7 +125,11 @@ pub fn start_pipeline(preroll: Option<&PreRollBuffer>) -> Result<PipelineHandle>
     if let Some(pr) = preroll {
         let pre = pr.drain();
         if !pre.is_empty() {
-            tracing::info!("Prepending {} pre-roll samples ({:.0}ms)", pre.len(), pre.len() as f64 / 16.0);
+            tracing::info!(
+                "Prepending {} pre-roll samples ({:.0}ms)",
+                pre.len(),
+                pre.len() as f64 / 16.0
+            );
             if let Ok(mut acc) = accumulator.lock() {
                 *acc = pre;
             }
@@ -131,12 +138,11 @@ pub fn start_pipeline(preroll: Option<&PreRollBuffer>) -> Result<PipelineHandle>
 
     let acc_clone = Arc::clone(&accumulator);
 
-    let stream = microphone::start_capture(Box::new(move |samples: &[f32]| {
-        match acc_clone.lock() {
+    let stream =
+        microphone::start_capture(Box::new(move |samples: &[f32]| match acc_clone.lock() {
             Ok(mut acc) => acc.extend_from_slice(samples),
             Err(e) => tracing::error!("recording accumulator lock poisoned: {}", e),
-        }
-    }))?;
+        }))?;
 
     Ok(PipelineHandle {
         mic_stream: stream,

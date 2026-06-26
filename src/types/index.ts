@@ -1,18 +1,20 @@
 export type ModelStatus =
-  | { kind: 'not_downloaded' }
-  | { kind: 'downloading'; progress: number; speed_mbps: number }
-  | { kind: 'downloaded' }
-  | { kind: 'loading' }
-  | { kind: 'ready' }
-  | { kind: 'error'; message: string };
+  | { kind: "not_downloaded" }
+  | { kind: "downloading"; progress: number; speed_mbps: number }
+  | { kind: "downloaded" }
+  | { kind: "loading" }
+  | { kind: "ready" }
+  | { kind: "error"; message: string };
 
-export type RecordingState = 'idle' | 'listening' | 'processing';
+export type RecordingState = "idle" | "listening";
 
 export type HotkeyStatus =
-  | 'available'
-  | 'needs_relogin'
-  | 'needs_group_add'
-  | 'no_keyboard';
+  | "available"
+  | "needs_relogin"
+  | "needs_group_add"
+  | "no_keyboard";
+
+export type ContinuousState = "listening" | "stopped";
 
 export interface TranscriptUpdate {
   text: string;
@@ -23,4 +25,9 @@ export interface DownloadProgress {
   downloaded_bytes: number;
   total_bytes: number;
   speed_mbps: number;
+}
+
+export interface ContinuousPastedEvent {
+  chars: number;
+  words: number;
 }

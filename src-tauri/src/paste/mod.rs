@@ -8,7 +8,7 @@
 //! Wayland, so focus save/restore is a no-op — the user's window stays
 //! focused because the app runs in the background.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 #[cfg(target_os = "macos")]
 use cocoa::base::{id, nil};
@@ -19,7 +19,7 @@ use core_graphics::event::{CGEvent, CGEventFlags, CGKeyCode};
 #[cfg(target_os = "macos")]
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 #[cfg(target_os = "macos")]
-use objc::{msg_send, sel, sel_impl, class};
+use objc::{class, msg_send, sel, sel_impl};
 
 /// Key code for 'V' on macOS
 #[cfg(target_os = "macos")]
@@ -74,8 +74,8 @@ pub fn write_to_pasteboard(text: &str) -> Result<()> {
     let cb = match CLIPBOARD.get() {
         Some(cb) => cb,
         None => {
-            let clip = arboard::Clipboard::new()
-                .map_err(|e| anyhow!("Failed to init clipboard: {e}"))?;
+            let clip =
+                arboard::Clipboard::new().map_err(|e| anyhow!("Failed to init clipboard: {e}"))?;
             // Ignore the Err if another thread won the race; either way get() succeeds after.
             let _ = CLIPBOARD.set(std::sync::Mutex::new(clip));
             CLIPBOARD.get().expect("clipboard set above")

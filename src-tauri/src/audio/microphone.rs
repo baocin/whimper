@@ -63,8 +63,7 @@ impl MicStream {
                 if let Some(resampled) = output.into_iter().next() {
                     // Deliver proportional output (not the zero-padded tail)
                     let ratio = guard.output_frames_max() as f64 / guard.input_frames_max() as f64;
-                    let valid_samples =
-                        (remaining as f64 * ratio).ceil() as usize;
+                    let valid_samples = (remaining as f64 * ratio).ceil() as usize;
                     let valid = valid_samples.min(resampled.len());
                     if valid > 0 {
                         tracing::debug!(
@@ -140,7 +139,13 @@ pub fn start_capture(on_chunk: AudioChunkCallback) -> Result<MicStream> {
                 if !is_active_clone.load(Ordering::SeqCst) {
                     return;
                 }
-                process_and_deliver(data, channels, &resampler_clone, &accumulator_clone, &on_chunk_clone);
+                process_and_deliver(
+                    data,
+                    channels,
+                    &resampler_clone,
+                    &accumulator_clone,
+                    &on_chunk_clone,
+                );
             },
             |err| tracing::error!("Audio stream error: {}", err),
             None,
@@ -157,9 +162,14 @@ pub fn start_capture(on_chunk: AudioChunkCallback) -> Result<MicStream> {
                     if !is_active2.load(Ordering::SeqCst) {
                         return;
                     }
-                    let float_data: Vec<f32> =
-                        data.iter().map(|&s| s as f32 / 32768.0).collect();
-                    process_and_deliver(&float_data, channels, &resampler2, &accumulator2, &on_chunk2);
+                    let float_data: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
+                    process_and_deliver(
+                        &float_data,
+                        channels,
+                        &resampler2,
+                        &accumulator2,
+                        &on_chunk2,
+                    );
                 },
                 |err| tracing::error!("Audio stream error: {}", err),
                 None,

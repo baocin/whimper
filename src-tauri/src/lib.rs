@@ -123,6 +123,15 @@ async fn hide_main_window(app_handle: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn show_main_window(app_handle: AppHandle) -> Result<(), String> {
+    if let Some(window) = app_handle.get_webview_window("main") {
+        window.show().map_err(|e| e.to_string())?;
+        window.set_focus().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn check_hotkey_status(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<state::HotkeyStatus, String> {
@@ -132,8 +141,15 @@ async fn check_hotkey_status(
 // ── Continuous Listening Commands ─────────────────────────────────────────
 
 #[tauri::command]
-async fn start_continuous(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
-    // Get the ASR client
+async fn start_continuous(
+    app_handle: AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    // Guard: don't start if hotkey recording is in progress
+    if *state.recording_state.lock().await == RecordingState::Listening {
+        return Err("Cannot start continuous: hotkey recording in progress".into());
+    }
+
     let client = {
         let guard = state.asr.lock().map_err(|e| e.to_string())?;
         guard
@@ -144,7 +160,7 @@ async fn start_continuous(state: tauri::State<'_, Arc<AppState>>) -> Result<(), 
     let sink = state.continuous_sink.clone();
     let pid = *state.previous_app_pid.lock().await;
 
-    let _handle = continuous::start(client, sink, pid);
+    let _handle = continuous::start(client, sink, Some(app_handle), pid);
     *state.continuous_handle.lock().map_err(|e| e.to_string())? = Some(_handle);
     *state.continuous_active.lock().await = true;
 
@@ -208,6 +224,12 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
 
         match *recording {
             RecordingState::Idle => {
+                // Guard: if continuous mode is active, ignore hotkey
+                if *state.continuous_active.lock().await {
+                    tracing::info!("hotkey ignored: continuous mode active");
+                    return;
+                }
+
                 // Check ASR server is ready (not blocking — quick clone + drop)
                 let client_ready = {
                     let guard = state.asr.lock();
@@ -498,6 +520,7 @@ pub fn run() {
             cancel_download,
             cancel_recording,
             hide_main_window,
+            show_main_window,
             check_hotkey_status,
             start_continuous,
             stop_continuous,

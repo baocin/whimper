@@ -79,11 +79,39 @@ impl TranscriptRecord {
 /// Single source of truth shared by the record builder and the paste-decision
 /// at the call site, so the logged flags can never disagree with the behaviour.
 /// `empty` takes precedence: an empty string is reported as empty, not as a
-/// hallucination, even though `is_hallucination("")` is also true.
+/// hallucination, even though the pattern list also matches `""`.
 pub fn classify_flags(text: &str) -> (bool, bool) {
     let empty = text.trim().is_empty();
-    let hallucination = !empty && crate::asr::ParakeetAsr::is_hallucination(text);
+    let hallucination = !empty && is_hallucination(text);
     (empty, hallucination)
+}
+
+/// Check whether a transcript is a known hallucination pattern (skip-paste).
+///
+/// Matches against a static list of common Parakeet-TDT hallucination outputs
+/// (e.g. "thank you", "[silence]") plus very short outputs (<3 chars).
+pub fn is_hallucination(text: &str) -> bool {
+    let text_lower = text.to_lowercase().trim().to_string();
+
+    let hallucinations = [
+        "",
+        ".",
+        "..",
+        "...",
+        "thank you",
+        "thanks for watching",
+        "please subscribe",
+        "bye",
+        "bye bye",
+        "[music]",
+        "[silence]",
+        "(silence)",
+        "(music)",
+        "you",
+        "the",
+    ];
+
+    hallucinations.contains(&text_lower.as_str()) || text_lower.len() < 3
 }
 
 /// Resolve the transcript log path: `~/.whimper/transcripts.jsonl`.
@@ -157,10 +185,7 @@ fn format_rfc3339(unix_secs: i64) -> String {
         secs_of_day % 60,
     );
     let (y, mon, d) = civil_from_days(days);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        y, mon, d, h, m, s
-    )
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mon, d, h, m, s)
 }
 
 /// Convert days-since-1970-01-01 to a `(year, month, day)` civil date (UTC).
@@ -284,7 +309,12 @@ mod tests {
         append_to(&path, &r).unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600, "file mode should be 0600, got {:o}", mode & 0o777);
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "file mode should be 0600, got {:o}",
+            mode & 0o777
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

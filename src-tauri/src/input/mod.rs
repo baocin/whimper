@@ -140,7 +140,7 @@ pub fn reexec_with_input_group() -> std::io::Error {
             return std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "shadow-utils `sg` not found at /usr/bin/sg or /bin/sg",
-            )
+            );
         }
     };
 
@@ -154,7 +154,10 @@ pub fn reexec_with_input_group() -> std::io::Error {
         cmd_str.push_str(&shquote(&arg));
     }
 
-    tracing::info!("self-heal: re-exec under `{} input` to gain keyboard access", sg);
+    tracing::info!(
+        "self-heal: re-exec under `{} input` to gain keyboard access",
+        sg
+    );
     Command::new(sg)
         .arg("input")
         .arg("-c")
@@ -192,7 +195,10 @@ where
         return status;
     }
 
-    tracing::info!("evdev: watching {} keyboard(s) for Alt+Space", keyboards.len());
+    tracing::info!(
+        "evdev: watching {} keyboard(s) for Alt+Space",
+        keyboards.len()
+    );
 
     for (path, device) in keyboards {
         let on_toggle = Arc::clone(&on_toggle);

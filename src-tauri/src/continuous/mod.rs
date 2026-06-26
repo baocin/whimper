@@ -1,14 +1,7 @@
 //! Continuous listening: always-on mic, silence-gated chunks, "paste" keyword.
-//!
-//! The mic runs constantly. Audio accumulates until we detect a silence gap
-//! ≥1 minute → that marks a "utterance boundary". Subsequent audio starts a
-//! new utterance. If the word "paste" (or phonetic equivalents) is detected
-//! in an utterance, the accumulated text since the last boundary is pasted.
-//!
-//! Design: single background task receives samples on a channel, every ~3s of
-//! audio sends it to ASR, accumulates text, and checks for the trigger word.
 
 use std::sync::Arc;
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Notify;
 
 use crate::asr::HttpAsrClient;
@@ -18,7 +11,7 @@ use crate::transcript;
 const CHUNK_INTERVAL_SECS: f64 = 3.0;
 const CHUNK_SAMPLES: usize = (16000.0 * CHUNK_INTERVAL_SECS) as usize;
 const SILENCE_THRESHOLD: f32 = 0.005;
-const SILENT_CHUNK_LIMIT: u32 = 20; // 20 × 3s = 60s
+const SILENT_CHUNK_LIMIT: u32 = 20;
 const REPORT_INTERVAL_SECS: u64 = 10;
 
 const TRIGGER_WORDS: &[&str] = &[
@@ -31,7 +24,6 @@ fn has_trigger(text: &str) -> bool {
     TRIGGER_WORDS.iter().any(|&w| lower.contains(w))
 }
 
-/// Shared sink: mic callback pushes samples in, background task drains.
 pub struct AudioSink {
     buf: std::sync::Mutex<Vec<f32>>,
     pub(crate) notify: Notify,
@@ -53,15 +45,64 @@ impl AudioSink {
     }
 }
 
-/// Run the continuous listening loop in a background tokio task.
-/// Returns a handle that can stop it.
+/// Open the overlay window with a paste-confirmation flash.
+////// ponytail: reuses the same webview pattern as hotkey overlay; auto-dismisses
+/// after 1.5s. If the window can't be built (e.g. in tests), the error is logged
+/// and discarded — non-fatal.
+fn show_paste_feedback(app: &AppHandle, mode: &str, label: &str) {
+    use tauri::Manager;
+    let url = format!("/overlay?mode={}&label={}", mode, urlencoding(label));
+    let overlay = tauri::WebviewWindowBuilder::new(
+        app,
+        "continuous-feedback",
+        tauri::WebviewUrl::App(url.into()),
+    )
+    .title("whimper-overlay")
+    .inner_size(400.0, 80.0)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .focused(false)
+    .resizable(false)
+    .build();
+
+    if let Ok(ref window) = overlay {
+        if let Ok(Some(monitor)) = window.current_monitor() {
+            let x = (monitor.size().width as f64 / 2.0 - 200.0) as i32;
+            let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+                x, 100,
+            )));
+        }
+        let h = app.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            if let Some(w) = h.get_webview_window("continuous-feedback") {
+                let _ = w.close();
+            }
+        });
+    }
+}
+
+/// URL-encode a simple string (just enough for label text).
+fn urlencoding(s: &str) -> String {
+    s.replace('%', "%25")
+        .replace(' ', "%20")
+        .replace('&', "%26")
+        .replace('?', "%3F")
+}
+
 pub fn start(
     asr: HttpAsrClient,
     sink: Arc<AudioSink>,
+    app: Option<AppHandle>,
     previous_pid: Option<i32>,
 ) -> ContinuousHandle {
     let stop = Arc::new(Notify::new());
     let stop_clone = stop.clone();
+
+    if let Some(ref a) = app {
+        let _ = a.emit("continuous-state", "listening");
+    }
 
     tokio::spawn(async move {
         let mut utterance_buf: Vec<f32> = Vec::new();
@@ -74,6 +115,9 @@ pub fn start(
             tokio::select! {
                 _ = stop_clone.notified() => {
                     tracing::info!("continuous: stopped");
+                    if let Some(ref a) = app {
+                        let _ = a.emit("continuous-state", "stopped");
+                    }
                     break;
                 }
                 _ = sink.notify.notified() => {}
@@ -124,12 +168,27 @@ pub fn start(
                             } else {
                                 format!("{}. {}", utterance_text, text)
                             };
+                            let word_count = full.split_whitespace().count();
                             tracing::info!(
                                 "continuous: paste trigger → pasting {} chars",
                                 full.len()
                             );
                             let _ = paste::paste_text(&full, previous_pid);
                             utterance_text.clear();
+                            if let Some(ref a) = app {
+                                let _ = a.emit(
+                                    "continuous-pasted",
+                                    serde_json::json!({
+                                        "chars": full.len(),
+                                        "words": word_count,
+                                    }),
+                                );
+                                show_paste_feedback(
+                                    a,
+                                    "continuous",
+                                    &format!("Pasted {} words", word_count),
+                                );
+                            }
                         } else {
                             if !utterance_text.is_empty() {
                                 utterance_text.push(' ');
@@ -203,8 +262,6 @@ impl ContinuousHandle {
         self.stop.notify_one();
     }
 }
-
-// ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -284,28 +341,24 @@ mod tests {
         rt.block_on(async {
             let client = HttpAsrClient::new("http://localhost:9360".to_string());
             let sink = AudioSink::new();
-            let _handle = start(client, sink.clone(), None);
+            let _handle = start(client, sink.clone(), None, None);
 
-            let chunk_size = 1600; // 100ms chunks
+            let chunk_size = 1600;
             let chunk_dur = std::time::Duration::from_millis(100);
             let total = audio.len() / chunk_size;
             let start = std::time::Instant::now();
-
             for i in 0..total {
                 let lo = i * chunk_size;
                 let hi = (lo + chunk_size).min(audio.len());
                 sink.push(&audio[lo..hi]);
-
                 let expected = chunk_dur * (i as u32 + 1);
                 if start.elapsed() < expected {
                     tokio::time::sleep(expected - start.elapsed()).await;
                 }
-
                 if i % (total / 10).max(1) == 0 {
                     eprintln!("  {:.0}%", i as f64 / total as f64 * 100.0);
                 }
             }
-
             let wall = start.elapsed().as_secs_f64();
             let ratio = wall / audio_duration;
             eprintln!(
