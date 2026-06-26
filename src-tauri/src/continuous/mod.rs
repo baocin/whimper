@@ -214,6 +214,12 @@ pub fn start(
                 (sum / samples.len() as f32).sqrt()
             };
 
+            // ponytail: info so user sees audio flow by default
+            tracing::info!(
+                "continuous: rms={rms:.5} silent={silent_count} buf={}",
+                utterance_buf.len()
+            );
+
             utterance_buf.extend_from_slice(&samples);
 
             if rms < SILENCE_THRESHOLD {
