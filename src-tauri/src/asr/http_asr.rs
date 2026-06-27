@@ -156,18 +156,15 @@ impl HttpAsrClient {
         }
 
         // ponytail: read raw JSON first so we can log shape on parse failure
-        let raw: serde_json::Value = resp
-            .json()
+        let text_body = resp
+            .text()
             .await
-            .map_err(|e| AsrError::Parse(format!("{e} (status {status})")))?;
-
-        tracing::debug!("continuous: ASR raw = {}", raw);
-        let result: AsrResult = serde_json::from_value(raw.clone()).map_err(|e| {
-            AsrError::Parse(format!(
-                "{e} — raw body keys: {:?}",
-                raw.as_object().map(|o| o.keys().collect::<Vec<_>>())
-            ))
-        })?;
+            .map_err(|e| AsrError::Parse(format!("read error: {e} (status {status})")))?;
+        tracing::debug!("continuous: ASR body = {text_body}");
+        let raw: serde_json::Value = serde_json::from_str(&text_body)
+            .map_err(|e| AsrError::Parse(format!("{e} (status {status}): {text_body}")))?;
+        let result: AsrResult = serde_json::from_value(raw)
+            .map_err(|e| AsrError::Parse(format!("{e} — raw body: {text_body}")))?;
 
         Ok(result)
     }
