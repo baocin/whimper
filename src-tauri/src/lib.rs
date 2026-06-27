@@ -188,19 +188,23 @@ async fn is_continuous_active(state: tauri::State<'_, Arc<AppState>>) -> Result<
 // ── Pre-roll Mic ─────────────────────────────────────────────────────────
 
 /// Start (or restart) the background pre-roll mic that fills the ring buffer.
+/// Spawns on a background thread so cpal's device probe doesn't block startup.
 fn start_preroll_mic(state: &Arc<AppState>) {
-    let buffer = Arc::clone(&state.preroll_buffer);
-    let sink = Some(state.continuous_sink.clone());
-    match audio::pipeline::start_preroll(buffer, sink) {
-        Ok(handle) => {
-            if let Ok(mut guard) = state.preroll_mic.lock() {
-                *guard = Some(handle);
+    let state = Arc::clone(state);
+    std::thread::spawn(move || {
+        let buffer = Arc::clone(&state.preroll_buffer);
+        let sink = Some(state.continuous_sink.clone());
+        match audio::pipeline::start_preroll(buffer, sink) {
+            Ok(handle) => {
+                if let Ok(mut guard) = state.preroll_mic.lock() {
+                    *guard = Some(handle);
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to start pre-roll mic: {e}");
             }
         }
-        Err(e) => {
-            tracing::error!("Failed to start pre-roll mic: {}", e);
-        }
-    }
+    });
 }
 
 /// Recover the recording state machine to Idle after a failed start: reset
@@ -594,6 +598,10 @@ pub fn run() {
                     start_preroll_mic(&state_for_load);
 
                     // Auto-start continuous mode if env var is set
+                    tracing::info!(
+                        "continuous: WHIMPER_CONTINUOUS={:?}",
+                        std::env::var_os("WHIMPER_CONTINUOUS")
+                    );
                     if std::env::var_os("WHIMPER_CONTINUOUS").is_some() {
                         let sink = state_for_load.continuous_sink.clone();
                         let client = state_for_load.asr.lock().ok().and_then(|g| g.clone());
