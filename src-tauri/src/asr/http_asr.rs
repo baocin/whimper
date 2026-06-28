@@ -36,10 +36,11 @@ pub struct AsrResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AsrWord {
+    #[serde(alias = "word")]
     pub text: String,
-    #[serde(default)]
+    #[serde(default, alias = "start_ms")]
     pub start: u64,
-    #[serde(default)]
+    #[serde(default, alias = "end_ms")]
     pub end: u64,
 }
 
