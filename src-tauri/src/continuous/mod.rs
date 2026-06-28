@@ -1,5 +1,6 @@
 //! Continuous listening: always-on mic, silence-gated chunks, "paste" keyword.
 
+use std::io::Write;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Notify;
@@ -7,6 +8,9 @@ use tokio::sync::Notify;
 use crate::asr::HttpAsrClient;
 use crate::paste;
 use crate::transcript;
+
+/// Path to the rolling continuous audio capture file. Overwritten each run.
+const CAPTURE_WAV: &str = "continuous.wav";
 
 // ponytail: 300ms chunks — GPU ASR finishes in ~100ms, no reason to wait 3s
 const CHUNK_INTERVAL_SECS: f64 = 0.3;
@@ -129,6 +133,34 @@ fn urlencoding(s: &str) -> String {
         .replace('?', "%3F")
 }
 
+/// Open a WAV file for writing, truncating any previous content.
+fn open_wav(path: &std::path::Path) -> Option<hound::WavWriter<std::io::BufWriter<std::fs::File>>> {
+    use hound::{SampleFormat, WavSpec, WavWriter};
+    use std::io::BufWriter;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok()?;
+    }
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate: 16000,
+        bits_per_sample: 16,
+        sample_format: SampleFormat::Int,
+    };
+    let file = std::fs::File::create(path).ok()?;
+    WavWriter::new(BufWriter::new(file), spec).ok()
+}
+
+/// Write f32 samples to an open WAV writer (no-op if writer is None).
+fn write_wav_samples(
+    writer: &mut Option<hound::WavWriter<std::io::BufWriter<std::fs::File>>>,
+    samples: &[f32],
+) {
+    let Some(ref mut w) = writer else { return };
+    for &s in samples {
+        let _ = w.write_sample((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
+    }
+}
+
 /// Process a transcription result: paste on trigger, accumulate otherwise.
 /// Shared between the chunk path and the flush-on-silence path.
 async fn handle_transcription(
@@ -150,6 +182,9 @@ async fn handle_transcription(
         let word_count = full.split_whitespace().count();
         tracing::info!("continuous: paste trigger → pasting {} chars", full.len());
         let _ = paste::paste_text(&full, previous_pid);
+        // ponytail: log to transcripts.jsonl for diagnostics
+        let rec = transcript::TranscriptRecord::new(full.clone(), 300, 0, true);
+        transcript::append(&rec);
         utterance_text.clear();
         if let Some(ref a) = app {
             let _ = a.emit(
@@ -186,6 +221,10 @@ pub fn start(
         let mut in_silence = false;
         let mut last_log = std::time::Instant::now();
 
+        // ponytail: open rolling WAV for diagnostic capture
+        let wav_path = crate::state::whimper_dir().join(CAPTURE_WAV);
+        let mut wav_writer = open_wav(&wav_path);
+
         loop {
             tokio::select! {
                 _ = stop_clone.notified() => {
@@ -215,6 +254,9 @@ pub fn start(
                 let sum: f32 = samples.iter().map(|s| s * s).sum();
                 (sum / samples.len() as f32).sqrt()
             };
+
+            // ponytail: write to diagnostic WAV
+            write_wav_samples(&mut wav_writer, &samples);
 
             // ponytail: info so user sees audio flow by default
             tracing::info!(
