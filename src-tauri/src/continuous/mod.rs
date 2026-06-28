@@ -8,15 +8,17 @@ use crate::asr::HttpAsrClient;
 use crate::paste;
 use crate::transcript;
 
-const CHUNK_INTERVAL_SECS: f64 = 3.0;
-const CHUNK_SAMPLES: usize = (16000.0 * CHUNK_INTERVAL_SECS) as usize;
+// ponytail: 300ms chunks — GPU ASR finishes in ~100ms, no reason to wait 3s
+const CHUNK_INTERVAL_SECS: f64 = 0.3;
+const CHUNK_SAMPLES: usize = (16000.0 * CHUNK_INTERVAL_SECS) as usize; // 4800
 const SILENCE_THRESHOLD: f32 = 0.005;
-const SILENT_CHUNK_LIMIT: u32 = 20;
+// ponytail: 300ms chunks × 200 = 60s silence gap
+const SILENT_CHUNK_LIMIT: u32 = 200;
 const REPORT_INTERVAL_SECS: u64 = 10;
 
 const TRIGGER_WORDS: &[&str] = &[
     "paste", "paced", "based", "baste", "waist", "waste", "taste", "pasta", "pacing", "racing",
-    "basing", "placing", "pasted", "paces", "pace",
+    "basing", "placing", "pasted", "paces", "pace", "haste", "pasteur",
 ];
 
 fn has_trigger(text: &str) -> bool {
@@ -357,7 +359,15 @@ mod tests {
 
     #[test]
     fn test_silence_limit_is_60s() {
-        assert_eq!(SILENT_CHUNK_LIMIT * (CHUNK_INTERVAL_SECS as u32), 60);
+        let gap_secs = SILENT_CHUNK_LIMIT as f64 * CHUNK_INTERVAL_SECS;
+        let gap_secs = (gap_secs * 100.0).round() / 100.0; // 2-decimal precision
+        assert!(
+            (gap_secs - 60.0).abs() < 0.1,
+            "{} chunks × {}s = {}s ≠ 60s",
+            SILENT_CHUNK_LIMIT,
+            CHUNK_INTERVAL_SECS,
+            gap_secs
+        );
     }
 
     #[test]
