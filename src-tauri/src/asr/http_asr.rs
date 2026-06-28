@@ -20,6 +20,7 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AsrResult {
+    #[serde(default)]
     pub text: String,
     #[serde(default)]
     pub words: Vec<AsrWord>,
