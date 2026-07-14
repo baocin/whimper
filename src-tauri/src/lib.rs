@@ -379,7 +379,7 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                     if let Some(client) = client_clone {
                         if !audio_samples.is_empty() {
                             // Convert float samples to i16 WAV bytes
-                            let wav_bytes = audio_samples_to_wav(&audio_samples);
+                            let wav_bytes = continuous::audio_to_wav(&audio_samples);
 
                             match client.transcribe(&wav_bytes, "whimper_recording.wav").await {
                                 Ok(r) => (r.text, r.processing_time_ms, r.audio_duration_ms),
@@ -443,30 +443,6 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
     });
 }
 
-/// Convert Vec<f32> audio samples to a WAV byte buffer (mono, 16kHz, 16-bit PCM).
-fn audio_samples_to_wav(samples: &[f32]) -> Vec<u8> {
-    use hound::WavWriter;
-    use std::io::Cursor;
-
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate: 16000,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-
-    let mut cursor = Cursor::new(Vec::new());
-    {
-        let mut writer = WavWriter::new(&mut cursor, spec).expect("Failed to create WAV writer");
-        for &s in samples {
-            let sample = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-            writer.write_sample(sample).ok();
-        }
-        writer.finalize().ok();
-    }
-    cursor.into_inner()
-}
-
 // ── App Entry Point ──────────────────────────────────────────────────────
 
 pub fn run() {
@@ -501,8 +477,8 @@ pub fn run() {
     }
 
     // ASR server URL: Docker internal or localhost for dev
-    let asr_server_url =
-        std::env::var("WHIMPER_ASR_URL").unwrap_or_else(|_| "http://localhost:9360".to_string());
+    let asr_server_url = std::env::var("WHIMPER_ASR_URL")
+        .unwrap_or_else(|_| "http://100.76.212.98:9364".to_string());
 
     let app_state = Arc::new(AppState::new(asr_server_url));
 
@@ -665,7 +641,7 @@ mod tests {
 
     #[test]
     fn test_app_state_initial_values() {
-        let state = AppState::new("http://localhost:9360".into());
+        let state = AppState::new("http://100.76.212.98:9364".into());
         assert!(!state.is_download_cancelled());
         assert!(state.asr.lock().unwrap().is_none());
     }

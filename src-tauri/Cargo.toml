@@ -1,3 +1,5 @@
+[workspace]
+
 [package]
 name = "whimper"
 version = "0.1.0"
@@ -19,14 +21,24 @@ tauri = { version = "2.11", features = ["macos-private-api"] }
 tauri-plugin-global-shortcut = "2"
 
 # Async runtime
-tokio = { version = "1.42", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tokio = { version = "1.42", features = [
+  "rt-multi-thread",
+  "sync",
+  "time",
+  "macros",
+] }
 
 # Audio capture + resampling
 cpal = "0.15"
 rubato = "0.16"
 
 # HTTP client for model download
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "multipart", "json"] }
+reqwest = { version = "0.12", default-features = false, features = [
+  "rustls-tls",
+  "stream",
+  "multipart",
+  "json",
+] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -65,7 +77,9 @@ core-foundation = "0.9"
 # Linux paste + global hotkey
 [target.'cfg(target_os = "linux")'.dependencies]
 # Clipboard (text only; wayland-data-control enables native Wayland support)
-arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+arboard = { version = "3", default-features = false, features = [
+  "wayland-data-control",
+] }
 # Key simulation for Ctrl+V (wayland = zwp_virtual_keyboard backend, x11rb fallback)
 enigo = { version = "0.6", features = ["wayland"] }
 # Raw /dev/input reading for the global hotkey (Wayland can't grab global keys)

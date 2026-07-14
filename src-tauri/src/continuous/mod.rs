@@ -327,7 +327,7 @@ async fn transcribe_chunk(asr: &HttpAsrClient, samples: &[f32]) -> String {
     }
 }
 
-fn audio_to_wav(samples: &[f32]) -> Vec<u8> {
+pub(crate) fn audio_to_wav(samples: &[f32]) -> Vec<u8> {
     use hound::{SampleFormat, WavSpec, WavWriter};
     use std::io::Cursor;
     let spec = WavSpec {

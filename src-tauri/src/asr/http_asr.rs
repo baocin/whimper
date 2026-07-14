@@ -157,27 +157,16 @@ impl HttpAsrClient {
             return Err(AsrError::Server(format!("{}: {}", status, body)));
         }
 
-        // ponytail: read raw JSON first so we can log shape on parse failure
+        // ponytail: raw text first for logging on parse failure
         let text_body = resp
             .text()
             .await
             .map_err(|e| AsrError::Parse(format!("read error: {e} (status {status})")))?;
         tracing::debug!("continuous: ASR body = {text_body}");
-        let raw: serde_json::Value = serde_json::from_str(&text_body)
+        let result: AsrResult = serde_json::from_str(&text_body)
             .map_err(|e| AsrError::Parse(format!("{e} (status {status}): {text_body}")))?;
-        let result: AsrResult = serde_json::from_value(raw)
-            .map_err(|e| AsrError::Parse(format!("{e} — raw body: {text_body}")))?;
 
         Ok(result)
-    }
-
-    /// Transcribe audio data with a custom filename.
-    pub async fn transcribe_with_name(
-        &self,
-        audio_data: &[u8],
-        filename: &str,
-    ) -> Result<AsrResult, AsrError> {
-        self.transcribe(audio_data, filename).await
     }
 }
 
