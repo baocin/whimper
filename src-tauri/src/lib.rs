@@ -478,7 +478,7 @@ pub fn run() {
 
     // ASR server URL: Docker internal or localhost for dev
     let asr_server_url = std::env::var("WHIMPER_ASR_URL")
-        .unwrap_or_else(|_| "http://100.76.212.98:9364".to_string());
+        .unwrap_or_else(|_| "http://100.76.212.98:9364".to_string()); // ponytail: Tailscale MOSS
 
     let app_state = Arc::new(AppState::new(asr_server_url));
 

@@ -1,5 +1,14 @@
 # Whimper
 
+**Default ASR:** MOSS (Parakeet TDT 0.6B) via HTTP on this machine's Tailscale
+IP (`100.76.212.98:9364`). Override with `WHIMPER_ASR_URL`. The original
+local-ONNX path is preserved for macOS — the release build from this branch
+(`msp/continuous`) uses it.
+
+**Continuous mode:** set `WHIMPER_CONTINUOUS=1` to auto-start always-on
+listening. Silence-gated 300ms chunks, trigger word "paste" (and phonetic
+variants) to paste accumulated speech.
+
 Local, privacy-first voice-to-text transcription for macOS and Linux. An open-source alternative to SuperWhisper that runs entirely on-device.
 
 Seriously got tired of not owning the software that most of my thoughts were streaming through.
