@@ -444,12 +444,19 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                             let wav_bytes = continuous::audio_to_wav(&audio_samples);
                             // ponytail: enhance through UniSE if WHIMPER_UNISE_URL is set
                             let enhanced = unise::enhance(&wav_bytes).await;
-
-                            match client.transcribe(&enhanced, "whimper_recording.wav").await {
-                                Ok(r) => (r.text, r.processing_time_ms, r.audio_duration_ms),
-                                Err(e) => {
-                                    tracing::error!("HTTP transcription failed: {}", e);
-                                    (String::new(), 0, fallback_duration_ms)
+                            // ponytail: speaker guard on hotkey recording too
+                            let wespeaker_url = std::env::var("WHIMPER_WESPEAKER_URL")
+                                .unwrap_or_else(|_| "http://100.76.212.98:8095".to_string());
+                            if !speaker::is_me(&enhanced, &wespeaker_url, "").await {
+                                tracing::info!("hotkey: speaker mismatch, not transcribing");
+                                (String::new(), 0, fallback_duration_ms)
+                            } else {
+                                match client.transcribe(&enhanced, "whimper_recording.wav").await {
+                                    Ok(r) => (r.text, r.processing_time_ms, r.audio_duration_ms),
+                                    Err(e) => {
+                                        tracing::error!("HTTP transcription failed: {}", e);
+                                        (String::new(), 0, fallback_duration_ms)
+                                    }
                                 }
                             }
                         } else {
