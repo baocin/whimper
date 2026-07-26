@@ -5597,6 +5597,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arboard",
+ "base64 0.22.1",
  "cocoa",
  "core-foundation 0.9.4",
  "core-graphics 0.24.0",

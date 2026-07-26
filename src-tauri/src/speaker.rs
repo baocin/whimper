@@ -37,7 +37,7 @@ fn init_me_embedding() {
 }
 
 /// Get embedding via HTTP POST (async — call from existing tokio context).
-async fn embedding_from(url: &str, wav_bytes: &[u8], model: &str) -> Result<Vec<f32>> {
+pub(crate) async fn embedding_from(url: &str, wav_bytes: &[u8], model: &str) -> Result<Vec<f32>> {
     let b64 = base64_encode(wav_bytes);
     let body = serde_json::json!({"input": b64, "model": model}).to_string();
     let resp = reqwest::Client::new()

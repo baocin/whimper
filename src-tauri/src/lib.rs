@@ -5,8 +5,10 @@ mod download;
 #[cfg(target_os = "linux")]
 mod input;
 mod paste;
+mod speaker;
 mod state;
 mod transcript;
+mod unise;
 
 use state::{AppState, ModelStatus, RecordingState};
 use std::sync::Arc;
@@ -136,6 +138,47 @@ async fn check_hotkey_status(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<state::HotkeyStatus, String> {
     Ok(state.hotkey_status.lock().map(|g| *g).unwrap_or_default())
+}
+
+/// Record audio for N seconds, get speaker embedding, save to ~/.whimper/me_speaker.json.
+// ponytail: opens mic, sleeps N seconds, closes mic. Reuses audio pipeline + speaker::embedding_from.
+#[tauri::command]
+async fn record_voice_sample(duration_secs: f64) -> Result<(), String> {
+    let handle = audio::pipeline::start_pipeline(None).map_err(|e| e.to_string())?;
+    tokio::time::sleep(std::time::Duration::from_secs_f64(duration_secs)).await;
+    let samples = handle.finalize();
+    if samples.is_empty() {
+        return Err("No audio captured".into());
+    }
+    let wav = continuous::audio_to_wav(&samples);
+    let wespeaker_url = std::env::var("WHIMPER_WESPEAKER_URL")
+        .unwrap_or_else(|_| "http://100.76.212.98:8095".to_string());
+    let embedding = speaker::embedding_from(&wespeaker_url, &wav, "wespeaker")
+        .await
+        .map_err(|e| e.to_string())?;
+    let json = serde_json::json!({ "wespeaker": embedding });
+    let path = crate::state::whimper_dir().join("me_speaker.json");
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json.to_string()).map_err(|e| e.to_string())?;
+    tracing::info!("saved voice embedding to {}", path.display());
+    Ok(())
+}
+
+/// Check whether a speaker embedding file exists.
+#[tauri::command]
+async fn check_speaker_status() -> Result<bool, String> {
+    let path = crate::state::whimper_dir().join("me_speaker.json");
+    Ok(path.exists())
+}
+
+/// Delete the saved speaker embedding, disabling selective transcription.
+#[tauri::command]
+async fn clear_speaker() -> Result<(), String> {
+    let path = crate::state::whimper_dir().join("me_speaker.json");
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 // ── Continuous Listening Commands ─────────────────────────────────────────
@@ -380,8 +423,10 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                         if !audio_samples.is_empty() {
                             // Convert float samples to i16 WAV bytes
                             let wav_bytes = continuous::audio_to_wav(&audio_samples);
+                            // ponytail: enhance through UniSE if WHIMPER_UNISE_URL is set
+                            let enhanced = unise::enhance(&wav_bytes).await;
 
-                            match client.transcribe(&wav_bytes, "whimper_recording.wav").await {
+                            match client.transcribe(&enhanced, "whimper_recording.wav").await {
                                 Ok(r) => (r.text, r.processing_time_ms, r.audio_duration_ms),
                                 Err(e) => {
                                     tracing::error!("HTTP transcription failed: {}", e);
@@ -503,6 +548,9 @@ pub fn run() {
             hide_main_window,
             show_main_window,
             check_hotkey_status,
+            record_voice_sample,
+            check_speaker_status,
+            clear_speaker,
             start_continuous,
             stop_continuous,
             is_continuous_active,

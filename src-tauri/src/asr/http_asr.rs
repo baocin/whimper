@@ -18,6 +18,22 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+/// Strip `<spk:N>` diarization tags from MOSS ASR output.
+/// ponytail: simple split/join, no regex dep needed.
+fn strip_diarization(text: &str) -> String {
+    text.split('<')
+        .enumerate()
+        .filter_map(|(i, part)| {
+            if i == 0 {
+                Some(part) // text before first tag passes through
+            } else {
+                part.split_once('>').map(|(_, after)| after)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AsrResult {
     #[serde(default)]
@@ -163,8 +179,9 @@ impl HttpAsrClient {
             .await
             .map_err(|e| AsrError::Parse(format!("read error: {e} (status {status})")))?;
         tracing::debug!("continuous: ASR body = {text_body}");
-        let result: AsrResult = serde_json::from_str(&text_body)
+        let mut result: AsrResult = serde_json::from_str(&text_body)
             .map_err(|e| AsrError::Parse(format!("{e} (status {status}): {text_body}")))?;
+        result.text = strip_diarization(&result.text);
 
         Ok(result)
     }
@@ -183,4 +200,37 @@ pub enum AsrError {
 
     #[error("Server not ready: {0}")]
     ServerNotReady(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_diarization_plain() {
+        assert_eq!(strip_diarization("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_strip_diarization_single_speaker() {
+        assert_eq!(strip_diarization("<spk:0> hello world"), " hello world");
+    }
+
+    #[test]
+    fn test_strip_diarization_multi_speaker() {
+        assert_eq!(
+            strip_diarization("<spk:0> hello <spk:1> world"),
+            " hello  world"
+        );
+    }
+
+    #[test]
+    fn test_strip_diarization_no_tags() {
+        assert_eq!(strip_diarization("just text"), "just text");
+    }
+
+    #[test]
+    fn test_strip_diarization_empty() {
+        assert_eq!(strip_diarization(""), "");
+    }
 }

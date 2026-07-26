@@ -21,3 +21,7 @@ export interface ContinuousPastedEvent {
   chars: number;
   words: number;
 }
+
+export interface SpeakerStatus {
+  has_embedding: boolean;
+}

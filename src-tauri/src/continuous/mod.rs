@@ -7,6 +7,7 @@ use tokio::sync::Notify;
 
 use crate::asr::HttpAsrClient;
 use crate::paste;
+use crate::speaker;
 use crate::transcript;
 
 /// Path to the rolling continuous audio capture file. Overwritten each run.
@@ -314,7 +315,17 @@ async fn transcribe_chunk(asr: &HttpAsrClient, samples: &[f32]) -> String {
         return String::new();
     }
     let wav = audio_to_wav(samples);
-    match asr.transcribe(&wav, "chunk.wav").await {
+    // ponytail: speaker guard — if WHIMPER_ME_SPEAKER is set and this chunk
+    // isn't "me", skip it. is_me returns true when no embedding is configured.
+    let wespeaker_url = std::env::var("WHIMPER_WESPEAKER_URL")
+        .unwrap_or_else(|_| "http://100.76.212.98:8095".to_string());
+    if !speaker::is_me(&wav, &wespeaker_url, "").await {
+        tracing::info!("continuous: speaker mismatch, skipping chunk");
+        return String::new();
+    }
+    // ponytail: enhance through UniSE if WHIMPER_UNISE_URL is set (best-effort)
+    let enhanced = crate::unise::enhance(&wav).await;
+    match asr.transcribe(&enhanced, "chunk.wav").await {
         Ok(r) => {
             let t = r.text.trim().to_string();
             let (empty, hall) = transcript::classify_flags(&t);

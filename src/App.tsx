@@ -19,6 +19,8 @@ function MainWindow() {
   const [lastPaste, setLastPaste] = useState<ContinuousPastedEvent | null>(
     null,
   );
+  const [hasSpeaker, setHasSpeaker] = useState(false);
+  const [recording, setRecording] = useState(false);
 
   const recheckHotkey = useCallback(() => {
     invoke<HotkeyStatus>("check_hotkey_status")
@@ -29,6 +31,9 @@ function MainWindow() {
   useEffect(() => {
     invoke<boolean>("is_continuous_active")
       .then(setContinuousActive)
+      .catch(() => {});
+    invoke<boolean>("check_speaker_status")
+      .then(setHasSpeaker)
       .catch(() => {});
     recheckHotkey();
   }, [recheckHotkey]);
@@ -68,6 +73,25 @@ function MainWindow() {
     }
   };
 
+  const recordVoice = () => {
+    setRecording(true);
+    invoke("record_voice_sample", { durationSecs: 5 })
+      .then(() => {
+        setHasSpeaker(true);
+        setRecording(false);
+      })
+      .catch((e: any) => {
+        console.error("record_voice_sample:", e);
+        setRecording(false);
+      });
+  };
+
+  const clearSpeaker = () => {
+    invoke("clear_speaker")
+      .then(() => setHasSpeaker(false))
+      .catch(console.error);
+  };
+
   const banner =
     hotkeyStatus && hotkeyStatus !== "available" ? (
       <HotkeyWarning status={hotkeyStatus} onRecheck={recheckHotkey} />
@@ -101,6 +125,26 @@ function MainWindow() {
           <p className="text-xs text-green-400 animate-pulse">
             Pasted {lastPaste.words} words ({lastPaste.chars} chars)
           </p>
+        )}
+      </div>
+
+      <hr className="w-48 border-zinc-700 my-4" />
+
+      <div className="flex flex-col items-center gap-2">
+        <button
+          onClick={recordVoice}
+          disabled={recording}
+          className="rounded-lg px-4 py-1.5 text-xs font-medium bg-zinc-700 hover:bg-zinc-600 text-zinc-200 disabled:opacity-50"
+        >
+          {recording ? "Recording 5s..." : hasSpeaker ? "Re-record voice" : "Record voice (5s)"}
+        </button>
+        {hasSpeaker && (
+          <button
+            onClick={clearSpeaker}
+            className="text-xs text-zinc-500 hover:text-zinc-300"
+          >
+            Clear voice profile (transcribe all speakers)
+          </button>
         )}
       </div>
     </div>
