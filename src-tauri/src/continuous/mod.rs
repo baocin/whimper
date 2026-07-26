@@ -13,12 +13,13 @@ use crate::transcript;
 /// Path to the rolling continuous audio capture file. Overwritten each run.
 const CAPTURE_WAV: &str = "continuous.wav";
 
-// ponytail: 300ms chunks — GPU ASR finishes in ~100ms, no reason to wait 3s
-const CHUNK_INTERVAL_SECS: f64 = 0.3;
-const CHUNK_SAMPLES: usize = (16000.0 * CHUNK_INTERVAL_SECS) as usize; // 4800
+// ponytail: 3s chunks — balances UniSE's 5s segmentation window against
+// realtime feel. 300ms meant 16x overhead for speech enhancement.
+const CHUNK_INTERVAL_SECS: f64 = 3.0;
+const CHUNK_SAMPLES: usize = (16000.0 * CHUNK_INTERVAL_SECS) as usize; // 48000
 const SILENCE_THRESHOLD: f32 = 0.005;
-// ponytail: 300ms chunks × 200 = 60s silence gap
-const SILENT_CHUNK_LIMIT: u32 = 200;
+// ponytail: 3s chunks × 20 = 60s silence gap
+const SILENT_CHUNK_LIMIT: u32 = 20;
 const REPORT_INTERVAL_SECS: u64 = 10;
 
 const TRIGGER_WORDS: &[&str] = &[
