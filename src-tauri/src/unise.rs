@@ -10,6 +10,11 @@ const DEFAULT_UNISE_URL: &str = "http://localhost:9363";
 /// Returns enhanced WAV bytes, or the original input if UNISE_URL is unset or the
 /// server is unreachable (ponytail: best-effort, silence on failure).
 pub async fn enhance(wav_bytes: &[u8]) -> Vec<u8> {
+    // ponytail: disable file lets the UI toggle without Rust state changes
+    let disable_path = crate::state::whimper_dir().join("disable_unise");
+    if disable_path.exists() {
+        return wav_bytes.to_vec();
+    }
     let url = match std::env::var("WHIMPER_UNISE_URL") {
         Ok(s) if !s.is_empty() => s,
         _ => return wav_bytes.to_vec(), // ponytail: skip if unset

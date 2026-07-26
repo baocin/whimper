@@ -21,6 +21,7 @@ function MainWindow() {
   );
   const [hasSpeaker, setHasSpeaker] = useState(false);
   const [recording, setRecording] = useState(false);
+  const [uniseEnabled, setUniseEnabled] = useState(true);
 
   const recheckHotkey = useCallback(() => {
     invoke<HotkeyStatus>("check_hotkey_status")
@@ -34,6 +35,9 @@ function MainWindow() {
       .catch(() => {});
     invoke<boolean>("check_speaker_status")
       .then(setHasSpeaker)
+      .catch(() => {});
+    invoke<boolean>("check_unise_status")
+      .then(setUniseEnabled)
       .catch(() => {});
     recheckHotkey();
   }, [recheckHotkey]);
@@ -92,6 +96,13 @@ function MainWindow() {
       .catch(console.error);
   };
 
+  const toggleUnise = () => {
+    const next = !uniseEnabled;
+    invoke("toggle_unise", { enabled: next })
+      .then(() => setUniseEnabled(next))
+      .catch(console.error);
+  };
+
   const banner =
     hotkeyStatus && hotkeyStatus !== "available" ? (
       <HotkeyWarning status={hotkeyStatus} onRecheck={recheckHotkey} />
@@ -146,6 +157,19 @@ function MainWindow() {
             Clear voice profile (transcribe all speakers)
           </button>
         )}
+      </div>
+
+      <div className="flex items-center gap-2 mt-2">
+        <input
+          id="unise-toggle"
+          type="checkbox"
+          checked={uniseEnabled}
+          onChange={toggleUnise}
+          className="accent-green-500"
+        />
+        <label htmlFor="unise-toggle" className="text-xs text-zinc-400">
+          Noise reduction (UniSE)
+        </label>
       </div>
     </div>
   );

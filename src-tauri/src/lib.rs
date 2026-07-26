@@ -181,6 +181,25 @@ async fn clear_speaker() -> Result<(), String> {
     Ok(())
 }
 
+/// Check whether UniSE noise reduction is toggled on.
+#[tauri::command]
+async fn check_unise_status() -> Result<bool, String> {
+    let disable_path = crate::state::whimper_dir().join("disable_unise");
+    Ok(!disable_path.exists()) // enabled by default when URL is configured
+}
+
+/// Toggle UniSE noise reduction on/off.
+#[tauri::command]
+async fn toggle_unise(enabled: bool) -> Result<(), String> {
+    let path = crate::state::whimper_dir().join("disable_unise");
+    if enabled {
+        let _ = std::fs::remove_file(&path);
+    } else {
+        std::fs::write(&path, b"1").map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 // ── Continuous Listening Commands ─────────────────────────────────────────
 
 #[tauri::command]
@@ -551,6 +570,8 @@ pub fn run() {
             record_voice_sample,
             check_speaker_status,
             clear_speaker,
+            check_unise_status,
+            toggle_unise,
             start_continuous,
             stop_continuous,
             is_continuous_active,
