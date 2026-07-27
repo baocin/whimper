@@ -290,7 +290,10 @@ mod tests {
     use super::*;
 
     fn write_group_fixture() -> PathBuf {
-        let path = std::env::temp_dir().join(format!("whimper_group_{}", std::process::id()));
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!("whimper_group_{}_{}", std::process::id(), n));
         let content = "\
 root:x:0:
 wheel:x:998:aoi
