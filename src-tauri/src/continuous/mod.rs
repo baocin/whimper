@@ -477,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs ASR server at localhost:9360"]
+    #[ignore = "needs MOSS ASR server running on localhost:9364"]
     fn test_replay_file_realtime() {
         let paths = [
             "test_recordings/Connecting Cables and Managing Power Grounds.mp3",
@@ -493,7 +493,7 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let client = HttpAsrClient::new("http://localhost:9360".to_string());
+            let client = HttpAsrClient::new("http://localhost:9364".to_string());
             let sink = AudioSink::new();
             let _handle = start(client, sink.clone(), None, None);
 
