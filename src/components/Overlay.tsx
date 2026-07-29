@@ -6,6 +6,13 @@ import { useTranscription } from '../hooks/useTranscription';
 export default function Overlay() {
   const { transcript } = useTranscription();
   const [processing, setProcessing] = useState(false);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    // ponytail: 500ms grace so user doesn't speak into a dead mic
+    const t = setTimeout(() => setReady(true), 500);
+    return () => clearTimeout(t);
+  }, []);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -26,8 +33,14 @@ export default function Overlay() {
     return () => { unlisten.then((f) => f()); };
   }, []);
 
-  const dotColor = processing ? 'bg-amber-400' : 'bg-red-500';
-  const label = processing ? 'Processing...' : (transcript || 'Listening...');
+  const dotColor = processing ? 'bg-amber-400' : ready ? 'bg-red-500' : 'bg-zinc-500';
+  const label = processing
+    ? 'Processing...'
+    : transcript
+    ? transcript
+    : ready
+    ? 'Listening...'
+    : 'Starting...';
 
   return (
     <div className="w-full h-full bg-black/80 backdrop-blur-md rounded-2xl flex items-center px-5 gap-3">
