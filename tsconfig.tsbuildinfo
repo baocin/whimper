@@ -1,0 +1,1 @@
+{"root":["./src/App.tsx","./src/main.tsx","./src/components/HotkeyWarning.tsx","./src/components/Overlay.tsx","./src/hooks/useTranscription.ts","./src/types/index.ts"],"version":"5.9.3"}

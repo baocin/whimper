@@ -8,6 +8,13 @@ export default function Overlay() {
   const [processing, setProcessing] = useState(false);
   const [mode, setMode] = useState<"hotkey" | "continuous">("hotkey");
   const [continuousLabel, setContinuousLabel] = useState<string | null>(null);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    // ponytail: 500ms grace so user doesn't speak into a dead mic
+    const t = setTimeout(() => setReady(true), 500);
+    return () => clearTimeout(t);
+  }, []);
 
   useEffect(() => {
     // Read mode from URL param
@@ -58,8 +65,14 @@ export default function Overlay() {
   }
 
   // Hotkey mode
-  const dotColor = processing ? "bg-amber-400" : "bg-red-500";
-  const label = processing ? "Processing..." : transcript || "Listening...";
+  const dotColor = processing ? "bg-amber-400" : ready ? "bg-red-500" : "bg-zinc-500";
+  const label = processing
+    ? "Processing..."
+    : transcript
+    ? transcript
+    : ready
+    ? "Listening..."
+    : "Starting...";
 
   return (
     <div className="w-full h-full bg-black/80 backdrop-blur-md rounded-2xl flex items-center px-5 gap-3">
