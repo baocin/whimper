@@ -27,7 +27,8 @@ jobs:
         run: bun install
 
       - name: Run unit tests
-        run: cargo test -p whimper --lib
+        working-directory: src-tauri
+        run: cargo test --lib
 
       - name: Build Tauri app
         run: bun run tauri build
@@ -68,7 +69,8 @@ jobs:
         run: bun install
 
       - name: Run unit tests
-        run: cargo test -p whimper --lib
+        working-directory: src-tauri
+        run: cargo test --lib
 
       - name: Build Tauri app
         # APPIMAGE_EXTRACT_AND_RUN: linuxdeploy/appimagetool are themselves
