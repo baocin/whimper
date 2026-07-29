@@ -371,6 +371,8 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                 // Start audio pipeline with pre-roll audio prepended
                 match audio::pipeline::start_pipeline(Some(&state.preroll_buffer)) {
                     Ok(handle) => {
+                        // ponytail: emit mic-active so the overlay knows audio is flowing
+                        let _ = app.emit("mic-active", ());
                         // Store the stream, then drop the (non-Send) std mutex
                         // guard *before* any await. `stored` carries the outcome
                         // out of the guard's scope.

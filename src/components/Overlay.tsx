@@ -8,6 +8,7 @@ export default function Overlay() {
   const [processing, setProcessing] = useState(false);
   const [mode, setMode] = useState<"hotkey" | "continuous">("hotkey");
   const [continuousLabel, setContinuousLabel] = useState<string | null>(null);
+  const [micActive, setMicActive] = useState(false);
 
   useEffect(() => {
     // Read mode from URL param
@@ -43,6 +44,12 @@ export default function Overlay() {
     };
   }, []);
 
+  // ponytail: mic-active fires once the audio pipeline is delivering samples
+  useEffect(() => {
+    const unlisten = listen("mic-active", () => setMicActive(true));
+    return () => { unlisten.then((f) => f()); };
+  }, []);
+
   if (mode === "continuous") {
     const label = continuousLabel || 'Continuous — say "paste"';
     return (
@@ -58,8 +65,14 @@ export default function Overlay() {
   }
 
   // Hotkey mode
-  const dotColor = processing ? "bg-amber-400" : "bg-red-500";
-  const label = processing ? "Processing..." : transcript || "Listening...";
+  const dotColor = processing ? "bg-amber-400" : micActive ? "bg-red-500" : "bg-zinc-500";
+  const label = processing
+    ? "Processing..."
+    : transcript
+    ? transcript
+    : micActive
+    ? "Listening..."
+    : "Starting...";
 
   return (
     <div className="w-full h-full bg-black/80 backdrop-blur-md rounded-2xl flex items-center px-5 gap-3">
