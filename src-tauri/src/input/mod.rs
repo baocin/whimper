@@ -173,6 +173,13 @@ pub fn start_evdev_listener<F>(on_toggle: F) -> HotkeyStatus
 where
     F: Fn() + Send + Sync + 'static,
 {
+    start_evdev_listener_with(on_toggle, KeyCode::KEY_LEFTALT, KeyCode::KEY_RIGHTALT)
+}
+
+pub fn start_evdev_listener_with<F>(on_toggle: F, mod1: KeyCode, mod2: KeyCode) -> HotkeyStatus
+where
+    F: Fn() + Send + Sync + 'static,
+{
     let on_toggle: Arc<dyn Fn() + Send + Sync> = Arc::new(on_toggle);
 
     let keyboards = enumerate_keyboards();
@@ -202,7 +209,7 @@ where
 
     for (path, device) in keyboards {
         let on_toggle = Arc::clone(&on_toggle);
-        thread::spawn(move || watch_device(path, device, on_toggle));
+        thread::spawn(move || watch_device(path, device, on_toggle, mod1, mod2));
     }
 
     HotkeyStatus::Available
@@ -216,10 +223,17 @@ where
 /// back off, and try to reopen the device by path. We only give up after a run
 /// of consecutive reopen failures, to avoid spinning forever on a device that
 /// was permanently unplugged.
-fn watch_device(path: PathBuf, mut device: Device, on_toggle: Arc<dyn Fn() + Send + Sync>) {
+fn watch_device(
+    path: PathBuf,
+    mut device: Device,
+    on_toggle: Arc<dyn Fn() + Send + Sync>,
+    mod1: KeyCode,
+    mod2: KeyCode,
+) {
     use std::time::Duration;
     const MAX_REOPEN_FAILURES: u32 = 10;
-    let mut alt_held = false;
+    let mut mod_held = false;
+    let mut ctrl_held = false;
     let mut reopen_failures: u32 = 0;
 
     loop {
@@ -232,14 +246,24 @@ fn watch_device(path: PathBuf, mut device: Device, on_toggle: Arc<dyn Fn() + Sen
                 for event in events {
                     if let EventSummary::Key(_, code, value) = event.destructure() {
                         match code {
-                            // value: 1 = press, 0 = release, 2 = auto-repeat
-                            KeyCode::KEY_LEFTALT | KeyCode::KEY_RIGHTALT => match value {
-                                1 => alt_held = true,
-                                0 => alt_held = false,
+                            // mod1/mod2 (left/right alt, or left/right ctrl via start_evdev_listener_with)
+                            c if c == mod1 || c == mod2 => match value {
+                                1 => mod_held = true,
+                                0 => mod_held = false,
                                 _ => {}
                             },
-                            KeyCode::KEY_SPACE if value == 1 && alt_held => {
-                                tracing::debug!("evdev: Alt+Space detected");
+                            // Ctrl state for Ctrl+Space combo
+                            KeyCode::KEY_LEFTCTRL | KeyCode::KEY_RIGHTCTRL => match value {
+                                1 => ctrl_held = true,
+                                0 => ctrl_held = false,
+                                _ => {}
+                            },
+                            // Space fires when either modifier is held
+                            KeyCode::KEY_SPACE if value == 1 && (mod_held || ctrl_held) => {
+                                tracing::debug!(
+                                    "evdev: hotkey detected (mod={})",
+                                    if mod_held { "alt" } else { "ctrl" }
+                                );
                                 on_toggle();
                             }
                             _ => {}
@@ -258,7 +282,8 @@ fn watch_device(path: PathBuf, mut device: Device, on_toggle: Arc<dyn Fn() + Sen
         match Device::open(&path) {
             Ok(dev) => {
                 device = dev;
-                alt_held = false; // modifier state is stale across a reopen
+                mod_held = false; // modifier state is stale across a reopen
+                ctrl_held = false;
                 reopen_failures = 0;
                 tracing::info!("evdev: reopened {:?}", path);
             }

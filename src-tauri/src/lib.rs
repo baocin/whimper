@@ -280,7 +280,83 @@ async fn recover_to_idle(app: &AppHandle, state: &Arc<AppState>) {
     start_preroll_mic(state);
 }
 
-// ── Global Hotkey Handler ────────────────────────────────────────────────
+/// Transcribe audio and ask an LLM, returning the LLM's response text.
+// ponytail: OpenAI-compatible POST to WHIMPER_LLM_URL (defaults to local llama-server).
+async fn transcribe_and_ask_llm(audio_samples: &[f32]) -> (String, u64, u64) {
+    // Transcribe first (reuse existing flow)
+    let wav_bytes = continuous::audio_to_wav(audio_samples);
+    let enhanced = unise::enhance(&wav_bytes).await;
+    let fallback = (audio_samples.len() as f64 / 16.0) as u64;
+
+    let (mut transcript, asr_time) = {
+        // We need a client clone — this runs outside handle_hotkey's context
+        // so the ASR client is checked at the call site.
+        // ponytail: inline a minimal transcribe rather than threading AppState.
+        let url = std::env::var("WHIMPER_ASR_URL")
+            .unwrap_or_else(|_| "http://100.76.212.98:9364".to_string());
+        let client = asr::HttpAsrClient::new(url);
+        match client.transcribe(&enhanced, "llm_recording.wav").await {
+            Ok(r) => (r.text, r.processing_time_ms),
+            Err(e) => {
+                tracing::error!("llm hotkey: ASR failed: {e}");
+                (String::new(), 0)
+            }
+        }
+    };
+
+    if transcript.is_empty() {
+        return (String::new(), 0, fallback);
+    }
+
+    // Post to LLM
+    let llm_url = std::env::var("WHIMPER_LLM_URL")
+        .unwrap_or_else(|_| "http://localhost:8081/v1/chat/completions".to_string());
+    let model = std::env::var("WHIMPER_LLM_MODEL").unwrap_or_else(|_| "default".to_string());
+    let api_key = std::env::var("WHIMPER_LLM_API_KEY").unwrap_or_default();
+
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": transcript}],
+    });
+
+    let start = std::time::Instant::now();
+    let client = reqwest::Client::new();
+    let mut req = client
+        .post(&llm_url)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(60));
+    if !api_key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", api_key));
+    }
+
+    match req.send().await {
+        Ok(resp) if resp.status().is_success() => {
+            match resp.json::<serde_json::Value>().await {
+                Ok(json) => {
+                    let reply = json["choices"][0]["message"]["content"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+                    let elapsed = start.elapsed().as_millis() as u64;
+                    tracing::info!("llm: {} chars in {}ms", reply.len(), elapsed);
+                    (reply, elapsed, fallback)
+                }
+                Err(e) => {
+                    tracing::error!("llm: parse error: {e}");
+                    (transcript, 0, fallback) // fallback to raw transcript
+                }
+            }
+        }
+        Ok(resp) => {
+            tracing::warn!("llm: server returned {}", resp.status());
+            (transcript, 0, fallback) // fallback to raw transcript
+        }
+        Err(e) => {
+            tracing::error!("llm: request failed: {e}");
+            (transcript, 0, fallback) // fallback to raw transcript
+        }
+    }
+}
 
 fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
     let app = app_handle.clone();
@@ -516,6 +592,122 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
     });
 }
 
+/// Same as handle_hotkey but replaces the paste step: transcribe, send to LLM,
+/// paste the LLM's response instead of the raw transcript.
+fn handle_llm_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
+    let app = app_handle.clone();
+    let state = state.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let mut recording = state.recording_state.lock().await;
+
+        match *recording {
+            RecordingState::Idle => {
+                if *state.continuous_active.lock().await {
+                    tracing::info!("llm hotkey ignored: continuous mode active");
+                    return;
+                }
+
+                let client_ready = state.asr.lock().ok().map(|g| g.is_some()).unwrap_or(false);
+                if !client_ready {
+                    tracing::warn!("ASR client not initialized, ignoring llm hotkey");
+                    return;
+                }
+
+                if let Some(pid) = paste::get_frontmost_app_pid() {
+                    *state.previous_app_pid.lock().await = Some(pid);
+                }
+
+                *recording = RecordingState::Listening;
+                drop(recording);
+
+                let overlay = tauri::WebviewWindowBuilder::new(
+                    &app,
+                    "overlay",
+                    tauri::WebviewUrl::App("/overlay".into()),
+                )
+                .title("whimper-overlay")
+                .inner_size(400.0, 80.0)
+                .decorations(false)
+                .transparent(true)
+                .always_on_top(true)
+                .focused(false)
+                .resizable(false)
+                .build();
+
+                if let Ok(ref window) = overlay {
+                    if let Ok(Some(monitor)) = window.current_monitor() {
+                        let x = (monitor.size().width as f64 / 2.0 - 200.0) as i32;
+                        let _ = window.set_position(tauri::Position::Physical(
+                            tauri::PhysicalPosition::new(x, 100),
+                        ));
+                    }
+                }
+                if let Some(pid) = *state.previous_app_pid.lock().await {
+                    let _ = paste::activate_app(pid);
+                }
+
+                // Stop pre-roll mic
+                if let Ok(mut guard) = state.preroll_mic.lock() {
+                    if let Some(handle) = guard.take() {
+                        handle.stop_mic();
+                    }
+                }
+
+                // Start pipeline
+                match audio::pipeline::start_pipeline(Some(&state.preroll_buffer)) {
+                    Ok(handle) => {
+                        let _ = app.emit("mic-active", ());
+                        if let Ok(mut guard) = state.mic_stream.lock() {
+                            *guard = Some(handle);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to start audio pipeline: {}", e);
+                        recover_to_idle(&app, &state).await;
+                    }
+                }
+            }
+            RecordingState::Listening => {
+                *recording = RecordingState::Idle;
+                drop(recording);
+
+                let audio_samples = match state.mic_stream.lock() {
+                    Ok(mut guard) => guard.take().map(|h| h.finalize()).unwrap_or_default(),
+                    Err(_) => Vec::new(),
+                };
+                start_preroll_mic(&state);
+                let _ = app.emit("recording-state", "processing");
+
+                // Transcribe + ask LLM
+                let (response, elapsed_ms, _duration) =
+                    transcribe_and_ask_llm(&audio_samples).await;
+
+                if let Some(window) = app.get_webview_window("overlay") {
+                    let _ = window.close();
+                }
+
+                let (empty, hallucination) = transcript::classify_flags(&response);
+                let mut pasted = false;
+                if !empty && !hallucination {
+                    let prev_pid = *state.previous_app_pid.lock().await;
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    match paste::paste_text(&response, prev_pid) {
+                        Ok(_) => {
+                            tracing::info!("llm hotkey: pasted {} chars", response.len());
+                            pasted = true;
+                        }
+                        Err(e) => tracing::error!("llm paste failed: {}", e),
+                    }
+                }
+
+                let record = transcript::TranscriptRecord::new(response, 0, elapsed_ms, pasted);
+                transcript::append(&record);
+            }
+        }
+    });
+}
+
 // ── App Entry Point ──────────────────────────────────────────────────────
 
 pub fn run() {
@@ -615,6 +807,18 @@ pub fn run() {
                     // Live-notify the UI (it also queries on mount).
                     let _ = app.handle().emit("hotkey-status", hotkey_status);
                 }
+                // ponytail: second hotkey Ctrl+Space for LLM transcription
+                let app_for_llm = app.handle().clone();
+                let state_for_llm = app_state.clone();
+                // We piggyback on the same evdev listener with ctrl modifiers.
+                // Don't update hotkey_status — it's shared, and Alt+Space is the primary.
+                let _ = input::start_evdev_listener_with(
+                    move || {
+                        handle_llm_hotkey(&app_for_llm, &state_for_llm);
+                    },
+                    evdev::KeyCode::KEY_LEFTCTRL,
+                    evdev::KeyCode::KEY_RIGHTCTRL,
+                );
             }
 
             // Auto-connect to ASR server at startup
