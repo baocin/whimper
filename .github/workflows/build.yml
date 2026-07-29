@@ -2,9 +2,9 @@ name: Build macOS App
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/unise, feat/llm-hotkey, feat/starting-label]
   pull_request:
-    branches: [main]
+    branches: [main, feat/unise, feat/llm-hotkey, feat/starting-label]
   workflow_dispatch:
 
 jobs:
