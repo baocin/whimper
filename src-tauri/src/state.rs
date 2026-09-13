@@ -3,8 +3,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::asr::ParakeetAsr;
+use crate::asr::NemotronAsr;
 use crate::audio::pipeline::{PipelineHandle, PreRollBuffer};
+use crate::dictation::LiveTypist;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
@@ -42,7 +43,7 @@ pub enum RecordingState {
 pub struct AppState {
     pub model_status: Mutex<ModelStatus>,
     pub recording_state: Mutex<RecordingState>,
-    pub asr: Arc<std::sync::Mutex<Option<ParakeetAsr>>>,
+    pub asr: Arc<std::sync::Mutex<Option<NemotronAsr>>>,
     pub cancel_download: AtomicBool,
     pub cancel_file_transcription: AtomicBool,
     /// PID of the app that was frontmost before we opened the overlay
@@ -53,6 +54,8 @@ pub struct AppState {
     pub preroll_buffer: Arc<PreRollBuffer>,
     /// Handle to the background pre-roll mic stream
     pub preroll_mic: std::sync::Mutex<Option<PipelineHandle>>,
+    /// Live dictation session — shared with the audio processing thread while recording
+    pub live_typist: std::sync::Mutex<Option<Arc<std::sync::Mutex<LiveTypist>>>>,
 }
 
 impl AppState {
@@ -67,6 +70,7 @@ impl AppState {
             mic_stream: std::sync::Mutex::new(None),
             preroll_buffer: Arc::new(PreRollBuffer::new()),
             preroll_mic: std::sync::Mutex::new(None),
+            live_typist: std::sync::Mutex::new(None),
         }
     }
 
@@ -87,10 +91,10 @@ impl AppState {
     }
 }
 
-/// Return the model directory path: ~/.whimper/models/parakeet-tdt/
+/// Return the model directory path: ~/.whimper/models/nemotron-int4/
 pub fn model_dir() -> std::path::PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    home.join(".whimper").join("models").join("parakeet-tdt")
+    home.join(".whimper").join("models").join("nemotron-int4")
 }
 
 #[cfg(test)]
@@ -111,7 +115,7 @@ mod tests {
     #[test]
     fn test_model_dir_path() {
         let dir = model_dir();
-        assert!(dir.ends_with(".whimper/models/parakeet-tdt"));
+        assert!(dir.ends_with(".whimper/models/nemotron-int4"));
     }
 
     #[test]

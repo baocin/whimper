@@ -1,5 +1,6 @@
 mod asr;
 mod audio;
+mod dictation;
 mod download;
 mod paste;
 mod state;
@@ -71,7 +72,7 @@ async fn load_model(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String
     let asr_arc = state.asr.clone();
 
     tokio::task::spawn_blocking(move || {
-        let asr = asr::ParakeetAsr::new();
+        let asr = asr::NemotronAsr::new();
         asr.load_model(&dir_str).map_err(|e| e.to_string())?;
         if let Ok(mut guard) = asr_arc.lock() {
             *guard = Some(asr);
@@ -104,6 +105,18 @@ async fn do_cancel_recording(app_handle: &AppHandle, state: &Arc<AppState>) {
         if let Ok(mut guard) = state.mic_stream.lock() {
             if let Some(handle) = guard.take() {
                 handle.stop_mic();
+            }
+        }
+
+        // Erase anything already typed — cancel means "leave no trace".
+        // finish("") reconciles to empty, and keeps the focus guard.
+        let typist = state.live_typist.lock().ok().and_then(|mut g| g.take());
+        if let Some(t) = typist {
+            if let Ok(mut t) = t.lock() {
+                let n = t.typed().chars().count();
+                if n > 0 && t.finish("") {
+                    tracing::info!("Cancelled: erased {} typed char(s)", n);
+                }
             }
         }
 
@@ -187,11 +200,9 @@ async fn pick_and_transcribe_file(
 
     let _ = app.emit("recording-state", "processing");
 
-    // Parakeet TDT encoder has a fixed positional encoding buffer of 9 999 entries.
-    // With 8× subsampling, a 600s chunk produces ~7 500 encoder tokens, requiring a
-    // position table of 2×7500−1 = 14 999 — exceeding the limit and crashing every chunk.
-    // Safe limit: ≤5 000 encoder tokens = ~40 000 mel frames = ~400s.
-    // Use 5-minute chunks (~3 750 tokens) for a comfortable safety margin.
+    // ponytail: Nemotron is cache-aware streaming, so it has no positional-encoding
+    // ceiling the way Parakeet TDT did. Chunking stays only to bound peak memory and
+    // to keep the progress bar moving. Raise it if long-file throughput matters.
     const CHUNK_SAMPLES: usize = 5 * 60 * 16_000; // 4,800,000 samples = 300s
 
     let asr_arc = state.asr.clone();
@@ -296,6 +307,22 @@ fn unregister_escape(app_handle: &AppHandle) {
 
 // ── Global Hotkey Handlers ───────────────────────────────────────────────
 
+/// How long to wait for the mic to deliver its first samples before giving up.
+/// A healthy device fires well inside this; the cap only catches a dead mic.
+const MIC_START_POLLS: u64 = 100;
+const MIC_START_POLL_INTERVAL_MS: u64 = 10;
+
+/// Stream-only dictation: keep whatever was typed live and skip the full-buffer
+/// finalization pass, so Option+Space stops instantly instead of waiting seconds
+/// for a re-transcription.
+///
+/// Defaults ON. Set `WHIMPER_FINALIZE=1` to restore the finalization + reconcile
+/// pass, which is also the only thing that runs Silero VAD and GTCRN — in
+/// stream-only mode the audio gets a high-pass filter and nothing else.
+fn stream_only() -> bool {
+    !matches!(std::env::var("WHIMPER_FINALIZE").as_deref(), Ok("1"))
+}
+
 fn handle_escape(app_handle: &AppHandle, state: &Arc<AppState>) {
     let app = app_handle.clone();
     let state = state.clone();
@@ -313,35 +340,26 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
 
         match *recording {
             RecordingState::Idle => {
-                // Check model is ready
-                if let Ok(guard) = state.asr.lock() {
-                    if guard.is_none() {
-                        tracing::warn!("Model not loaded, ignoring hotkey");
-                        return;
-                    }
+                // Nothing is announced to the user until the model is loaded AND the
+                // microphone is actually delivering samples. Everything below is setup;
+                // the overlay only appears once both are true.
+
+                // The model must be loaded, not merely downloaded.
+                let model_ready = state
+                    .asr
+                    .lock()
+                    .map(|g| g.as_ref().is_some_and(|a| a.is_loaded()))
+                    .unwrap_or(false);
+                if !model_ready {
+                    tracing::warn!("Model not loaded, ignoring hotkey");
+                    return;
                 }
 
                 // Save frontmost app PID before we steal focus
                 if let Some(pid) = paste::get_frontmost_app_pid() {
                     *state.previous_app_pid.lock().await = Some(pid);
                 }
-
-                *recording = RecordingState::Listening;
-                tracing::info!("Recording started");
-                drop(recording);
-
-                register_escape(&app);
-
-                // Show the pre-created overlay window and reset its state
-                let _ = app.emit("recording-state", "listening");
-                if let Some(window) = app.get_webview_window("overlay") {
-                    let _ = window.show();
-                }
-
-                // Re-activate previous app so overlay doesn't steal keyboard focus
-                if let Some(pid) = *state.previous_app_pid.lock().await {
-                    let _ = paste::activate_app(pid);
-                }
+                let guard_pid = *state.previous_app_pid.lock().await;
 
                 // Stop pre-roll mic before starting recording (avoid two mic streams)
                 if let Ok(mut guard) = state.preroll_mic.lock() {
@@ -351,18 +369,81 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                     }
                 }
 
-                // Start audio pipeline (batch mode — streaming preprocessing
-                // is available but not yet production-quality)
-                match audio::pipeline::start_pipeline(Some(&state.preroll_buffer)) {
-                    Ok(handle) => {
-                        if let Ok(mut guard) = state.mic_stream.lock() {
-                            *guard = Some(handle);
-                        }
+                // Live dictation: stream preprocessing during recording and type
+                // text into the target app as the model emits it.
+                let typist = Arc::new(std::sync::Mutex::new(dictation::LiveTypist::new(
+                    state.asr.clone(),
+                )));
+                let cb_typist = Arc::clone(&typist);
+                let on_chunk: Box<dyn FnMut(&[f32]) + Send> = Box::new(move |samples: &[f32]| {
+                    if let Ok(mut t) = cb_typist.lock() {
+                        t.feed(samples);
                     }
+                });
+
+                // Only buffer raw audio when a finalization pass will actually consume it.
+                let handle = match audio::pipeline::start_pipeline_streaming(
+                    Some(&state.preroll_buffer),
+                    !stream_only(),
+                    Some(on_chunk),
+                ) {
+                    Ok(h) => h,
                     Err(e) => {
                         tracing::error!("Failed to start audio pipeline: {}", e);
-                        do_cancel_recording(&app, &state).await;
+                        start_preroll_mic(&state);
+                        return;
                     }
+                };
+
+                // `stream.play()` returning Ok does not mean the device is delivering
+                // audio — it can succeed and stay silent if the mic is busy or muted.
+                // Wait for real samples before claiming to be listening.
+                let mut live = false;
+                for _ in 0..MIC_START_POLLS {
+                    if handle.has_audio() {
+                        live = true;
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        MIC_START_POLL_INTERVAL_MS,
+                    ))
+                    .await;
+                }
+
+                if !live {
+                    tracing::error!(
+                        "Microphone produced no audio within {}ms — not starting",
+                        MIC_START_POLLS * MIC_START_POLL_INTERVAL_MS
+                    );
+                    handle.stop_mic();
+                    drop(handle);
+                    let _ = app.emit("mic-error", "Microphone produced no audio");
+                    start_preroll_mic(&state);
+                    return;
+                }
+
+                // Mic is genuinely live — commit and announce.
+                if let Ok(mut guard) = state.mic_stream.lock() {
+                    *guard = Some(handle);
+                }
+                if let Ok(mut guard) = state.live_typist.lock() {
+                    *guard = Some(typist);
+                }
+
+                *recording = RecordingState::Listening;
+                tracing::info!("Recording started (mic confirmed live)");
+                drop(recording);
+
+                register_escape(&app);
+
+                let _ = app.emit("recording-state", "listening");
+                if let Some(window) = app.get_webview_window("overlay") {
+                    let _ = window.show();
+                }
+
+                // Re-activate previous app so overlay doesn't steal keyboard focus
+                if let Some(pid) = guard_pid {
+                    let _ = paste::activate_app(pid);
                 }
             }
             RecordingState::Listening => {
@@ -372,12 +453,21 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                 // Unregister ESC shortcut
                 unregister_escape(&app);
 
-                // Finalize pipeline: stop mic, get audio buffer
+                // Finalize pipeline: stop mic, get audio buffer. This joins the
+                // processing thread, so the typist is no longer being fed after it.
                 let audio_samples = if let Ok(mut guard) = state.mic_stream.lock() {
                     guard.take().map(|h| h.finalize()).unwrap_or_default()
                 } else {
                     Vec::new()
                 };
+
+                // Type the tail of the utterance that never filled a full chunk.
+                let typist = state.live_typist.lock().ok().and_then(|mut g| g.take());
+                if let Some(ref t) = typist {
+                    if let Ok(mut t) = t.lock() {
+                        t.flush();
+                    }
+                }
 
                 tracing::info!(
                     "Recording stopped, {} samples ({:.1}s)",
@@ -388,16 +478,33 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                 // Restart pre-roll mic now that recording is done
                 start_preroll_mic(&state);
 
-                let _ = app.emit("recording-state", "processing");
+                let stream_only = stream_only();
+
+                if stream_only {
+                    // Stop must feel instant: there is no finalization pass to wait
+                    // for, so drop the overlay now instead of showing "Processing...".
+                    if let Some(window) = app.get_webview_window("overlay") {
+                        let _ = window.hide();
+                    }
+                    let _ = app.emit("recording-state", "idle");
+                } else {
+                    let _ = app.emit("recording-state", "processing");
+                }
 
                 // Batch-transcribe on blocking thread
                 let asr_arc = state.asr.clone();
-                let transcript = if !audio_samples.is_empty() {
+                let transcript = if stream_only {
+                    typist
+                        .as_ref()
+                        .and_then(|t| t.lock().ok().map(|t| t.typed().to_string()))
+                        .unwrap_or_default()
+                } else if !audio_samples.is_empty() {
                     match tokio::task::spawn_blocking(move || {
                         let guard = asr_arc.lock().map_err(|e| format!("ASR lock: {}", e))?;
                         let asr = guard
                             .as_ref()
                             .ok_or_else(|| "Model not loaded".to_string())?;
+                        // The accumulator holds raw audio — run the full batch pipeline.
                         asr.transcribe(&audio_samples, false)
                             .map(|r| r.text)
                             .map_err(|e| e.to_string())
@@ -442,24 +549,50 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                     }
                 }
 
+                if stream_only {
+                    // The text is already in the target app — nothing to reconcile.
+                    tracing::info!("Stream-only: finalization skipped");
+                    return;
+                }
+
                 // Hide overlay
                 if let Some(window) = app.get_webview_window("overlay") {
                     let _ = window.hide();
                 }
 
-                // Paste if we have text (and it's not a hallucination)
-                if !transcript.trim().is_empty()
-                    && !asr::ParakeetAsr::is_hallucination(&transcript)
-                {
-                    let prev_pid = *state.previous_app_pid.lock().await;
+                // Reconcile what was typed live against the higher-quality final pass.
+                let keep = !transcript.trim().is_empty()
+                    && !asr::NemotronAsr::is_hallucination(&transcript);
+                let final_text = if keep { transcript.as_str() } else { "" };
 
-                    // Small delay for overlay to close
-                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                match typist {
+                    Some(t) => {
+                        // Small delay for overlay to close before touching the target app
+                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
-                    match paste::paste_text(&transcript, prev_pid) {
-                        Ok(_) => tracing::info!("Paste succeeded"),
-                        Err(e) => tracing::error!("Paste failed: {}", e),
+                        if let Ok(mut t) = t.lock() {
+                            if t.aborted() {
+                                tracing::warn!(
+                                    "Live typing was aborted (focus moved); leaving {} typed char(s) as-is",
+                                    t.typed().chars().count()
+                                );
+                            } else if t.finish(final_text) {
+                                tracing::info!("Dictation reconciled");
+                            } else {
+                                tracing::warn!("Reconciliation skipped");
+                            }
+                        }
                     }
+                    None if keep => {
+                        // No dictation session (shouldn't happen) — fall back to pasting.
+                        let prev_pid = *state.previous_app_pid.lock().await;
+                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                        match paste::paste_text(&transcript, prev_pid) {
+                            Ok(_) => tracing::info!("Paste succeeded"),
+                            Err(e) => tracing::error!("Paste failed: {}", e),
+                        }
+                    }
+                    None => {}
                 }
             }
         }
@@ -469,10 +602,12 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
 // ── App Entry Point ──────────────────────────────────────────────────────
 
 pub fn run() {
+    // RUST_LOG wins when set. Previously an added `whimper=info` directive
+    // silently overrode it, so RUST_LOG=whimper=debug produced no debug output.
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("whimper=info".parse().unwrap()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("whimper=info")),
         )
         .init();
 
@@ -546,7 +681,7 @@ pub fn run() {
                     let asr_arc = state_for_load.asr.clone();
 
                     let result = tokio::task::spawn_blocking(move || {
-                        let asr = asr::ParakeetAsr::new();
+                        let asr = asr::NemotronAsr::new();
                         asr.load_model(&dir_str)?;
                         Ok::<_, anyhow::Error>(asr)
                     })
@@ -559,7 +694,7 @@ pub fn run() {
                             }
                             *state_for_load.model_status.lock().await = ModelStatus::Ready;
                             let _ = app_handle2.emit("model-ready", ());
-                            tracing::info!("Parakeet TDT model auto-loaded successfully");
+                            tracing::info!("Nemotron model auto-loaded successfully");
 
                             // Start background pre-roll mic
                             start_preroll_mic(&state_for_load);

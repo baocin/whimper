@@ -7,9 +7,10 @@
 
 use anyhow::Result;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::asr::{GtcrnEnhancer, SileroVad, StreamingPreprocessor};
+use crate::asr::StreamingPreprocessor;
 use crate::audio::microphone::{self, MicStream};
 
 /// 300ms of 16kHz audio
@@ -59,6 +60,10 @@ pub struct PipelineHandle {
     processing_thread: Option<std::thread::JoinHandle<()>>,
     /// Channel sender for streaming mode — dropping this signals the processing thread to flush
     tx: Option<std::sync::mpsc::SyncSender<Vec<f32>>>,
+    /// Set by the mic callback the first time real samples arrive.
+    /// `stream.play()` succeeding does not mean the device is actually delivering audio,
+    /// so this is what "actively listening" is gated on.
+    audio_seen: Arc<AtomicBool>,
 }
 
 // MicStream is Send (unsafe impl in microphone.rs), and everything else is Arc/Mutex
@@ -103,6 +108,11 @@ impl PipelineHandle {
     pub fn is_streaming(&self) -> bool {
         self.processing_thread.is_some()
     }
+
+    /// True once the microphone has actually delivered samples.
+    pub fn has_audio(&self) -> bool {
+        self.audio_seen.load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for PipelineHandle {
@@ -122,8 +132,13 @@ impl Drop for PipelineHandle {
 /// Start a background pre-roll mic that fills the given ring buffer.
 pub fn start_preroll(buffer: Arc<PreRollBuffer>) -> Result<PipelineHandle> {
     let accumulator = Arc::new(Mutex::new(Vec::<f32>::new()));
+    let audio_seen = Arc::new(AtomicBool::new(false));
+    let seen_for_mic = Arc::clone(&audio_seen);
 
     let stream = microphone::start_capture(Box::new(move |samples: &[f32]| {
+        if !samples.is_empty() {
+            seen_for_mic.store(true, Ordering::Relaxed);
+        }
         buffer.push(samples);
     }))?;
 
@@ -134,6 +149,7 @@ pub fn start_preroll(buffer: Arc<PreRollBuffer>) -> Result<PipelineHandle> {
         accumulator,
         processing_thread: None,
         tx: None,
+        audio_seen,
     })
 }
 
@@ -155,8 +171,13 @@ pub fn start_pipeline(preroll: Option<&PreRollBuffer>) -> Result<PipelineHandle>
     }
 
     let acc_clone = Arc::clone(&accumulator);
+    let audio_seen = Arc::new(AtomicBool::new(false));
+    let seen_for_mic = Arc::clone(&audio_seen);
 
     let stream = microphone::start_capture(Box::new(move |samples: &[f32]| {
+        if !samples.is_empty() {
+            seen_for_mic.store(true, Ordering::Relaxed);
+        }
         if let Ok(mut acc) = acc_clone.lock() {
             acc.extend_from_slice(samples);
         }
@@ -167,19 +188,24 @@ pub fn start_pipeline(preroll: Option<&PreRollBuffer>) -> Result<PipelineHandle>
         accumulator,
         processing_thread: None,
         tx: None,
+        audio_seen,
     })
 }
 
-/// Start recording with streaming preprocessing: highpass + VAD-gated GTCRN
-/// run incrementally on a processing thread during recording.
+/// Start recording with a live transcription feed.
 ///
-/// The mic callback sends raw samples through a channel to the processing thread,
-/// which runs StreamingPreprocessor and writes enhanced samples to the accumulator.
-/// `finalize()` returns pre-enhanced audio.
+/// `on_chunk` receives high-passed samples as they arrive, for live streaming
+/// transcription. It runs on the processing thread, so a slow callback backs up
+/// the channel (the mic callback drops samples rather than block).
+///
+/// With `accumulate`, the handle keeps RAW audio so the final transcription pass
+/// can run the full batch pipeline (GTCRN, spectral gate, VAD trim) over the whole
+/// buffer. In stream-only mode that pass never runs, so accumulating would just
+/// grow ~230MB/hour for nothing — pass false and the buffer stays empty.
 pub fn start_pipeline_streaming(
     preroll: Option<&PreRollBuffer>,
-    vad: Arc<Mutex<SileroVad>>,
-    gtcrn: Arc<Mutex<GtcrnEnhancer>>,
+    accumulate: bool,
+    mut on_chunk: Option<Box<dyn FnMut(&[f32]) + Send>>,
 ) -> Result<PipelineHandle> {
     let accumulator = Arc::new(Mutex::new(Vec::<f32>::new()));
 
@@ -202,35 +228,45 @@ pub fn start_pipeline_streaming(
                     preroll_samples.len(),
                     preroll_samples.len() as f64 / 16.0
                 );
-                let enhanced = preprocessor.process_chunk(&preroll_samples, &vad, &gtcrn);
-                if !enhanced.is_empty() {
+                let filtered = preprocessor.process_chunk(&preroll_samples);
+                if accumulate {
                     if let Ok(mut acc) = acc_for_thread.lock() {
-                        acc.extend_from_slice(&enhanced);
+                        acc.extend_from_slice(&preroll_samples);
                     }
+                }
+                if let Some(cb) = on_chunk.as_mut() {
+                    cb(&filtered);
                 }
             }
 
-            // Process incoming mic chunks
+            // Process incoming mic chunks: raw to the accumulator for the final
+            // pass, high-passed to the live transcription feed.
             while let Ok(samples) = rx.recv() {
-                let enhanced = preprocessor.process_chunk(&samples, &vad, &gtcrn);
-                if !enhanced.is_empty() {
+                if samples.is_empty() {
+                    continue;
+                }
+                if accumulate {
                     if let Ok(mut acc) = acc_for_thread.lock() {
-                        acc.extend_from_slice(&enhanced);
+                        acc.extend_from_slice(&samples);
                     }
+                }
+                let filtered = preprocessor.process_chunk(&samples);
+                if let Some(cb) = on_chunk.as_mut() {
+                    cb(&filtered);
                 }
             }
 
-            // Channel closed (sender dropped in finalize) — flush remaining
-            let flushed = preprocessor.flush(&vad, &gtcrn);
-            if !flushed.is_empty() {
-                if let Ok(mut acc) = acc_for_thread.lock() {
-                    acc.extend_from_slice(&flushed);
-                }
-            }
+            preprocessor.flush();
         })?;
 
     let tx_for_mic = tx.clone();
+    let audio_seen = Arc::new(AtomicBool::new(false));
+    let seen_for_mic = Arc::clone(&audio_seen);
+
     let stream = microphone::start_capture(Box::new(move |samples: &[f32]| {
+        if !samples.is_empty() {
+            seen_for_mic.store(true, Ordering::Relaxed);
+        }
         // Non-blocking send — if the processing thread falls behind, we drop samples
         // rather than blocking the audio thread
         let _ = tx_for_mic.try_send(samples.to_vec());
@@ -241,5 +277,6 @@ pub fn start_pipeline_streaming(
         accumulator,
         processing_thread: Some(processing_thread),
         tx: Some(tx),
+        audio_seen,
     })
 }
