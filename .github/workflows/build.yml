@@ -2,35 +2,66 @@ name: Build macOS App
 
 on:
   push:
-    branches: [main]
+    branches: [main, nemotron]
+    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
-    runs-on: macos-latest
-
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-
       - uses: oven-sh/setup-bun@v2
-
-      - name: Install frontend dependencies
-        run: bun install
-
-      - name: Build Tauri app
-        run: bun run tauri build
-
-      - name: Upload .app bundle
-        uses: actions/upload-artifact@v4
+      - run: bun install --frozen-lockfile
+      - run: bun run test --run
+      - name: Build app and disk image
+        run: bun run tauri build --bundles app,dmg
+      - name: Rust tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - name: Package downloads
+        env:
+          ARCH: aarch64
+        run: |
+          mkdir downloads
+          tar -czf "downloads/Whimper_${ARCH}.app.tar.gz" -C src-tauri/target/release/bundle/macos Whimper.app
+          cp src-tauri/target/release/bundle/dmg/*.dmg downloads/
+      - uses: actions/upload-artifact@v4
         with:
-          name: Whimper.app
-          path: src-tauri/target/release/bundle/macos/Whimper.app
+          name: Whimper-aarch64
+          path: downloads/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Whimper-*
+          merge-multiple: true
+          path: downloads
+      - name: Publish macOS release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          (cd downloads && sha256sum * > SHA256SUMS)
+          gh release create "$RELEASE_TAG" downloads/* --verify-tag \
+            --title "Whimper $RELEASE_TAG — Nemotron streaming" \
+            --notes-file .github/release-notes.md

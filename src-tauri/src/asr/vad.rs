@@ -41,11 +41,11 @@ impl SileroVad {
         let session = Session::builder()
             .context("Failed to create session builder")?
             .with_optimization_level(GraphOptimizationLevel::Level3)
-            .context("Failed to set optimization level")?
+            .map_err(|e| anyhow::anyhow!("Failed to set optimization level: {e}"))?
             .with_intra_threads(1)
-            .context("Failed to set intra threads")?
+            .map_err(|e| anyhow::anyhow!("Failed to set intra threads: {e}"))?
             .commit_from_memory(MODEL_BYTES)
-            .context("Failed to load embedded Silero VAD model")?;
+            .map_err(|e| anyhow::anyhow!("Failed to load embedded Silero VAD model: {e}"))?;
 
         self.session = Some(session);
         self.model_loaded.store(true, Ordering::SeqCst);

@@ -3,3 +3,12 @@ dist/
 target/
 *.part
 .DS_Store
+*.tsbuildinfo
+vite.config.d.ts
+vite.config.js
+src-tauri/log.txt
+*.log
+*.jsonl
+.env
+.env.*
+!.env.example

@@ -124,6 +124,93 @@ pub fn paste_text(text: &str, previous_pid: Option<i32>) -> Result<()> {
     Ok(())
 }
 
+// ── Live typing (streaming dictation) ────────────────────────────────────
+//
+// Text is injected as synthesized keystrokes rather than pasted, so the user's
+// clipboard is never touched. Corrections are made by posting backspaces.
+
+/// Key code for Delete/Backspace on macOS
+#[cfg(target_os = "macos")]
+const KEY_DELETE: CGKeyCode = 51;
+
+/// Type text as synthesized keystrokes. Does not touch the pasteboard.
+#[cfg(target_os = "macos")]
+pub fn type_text(text: &str) -> Result<()> {
+    if text.is_empty() {
+        return Ok(());
+    }
+
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| anyhow!("Failed to create CGEventSource"))?;
+
+    // CGEventKeyboardSetUnicodeString takes a UTF-16 buffer. Post in small
+    // batches so a long correction doesn't arrive as one oversized event.
+    let utf16: Vec<u16> = text.encode_utf16().collect();
+    for piece in utf16.chunks(16) {
+        let down = CGEvent::new_keyboard_event(source.clone(), 0, true)
+            .map_err(|_| anyhow!("Failed to create key down event"))?;
+        down.set_string_from_utf16_unchecked(piece);
+        down.post(core_graphics::event::CGEventTapLocation::HID);
+
+        let up = CGEvent::new_keyboard_event(source.clone(), 0, false)
+            .map_err(|_| anyhow!("Failed to create key up event"))?;
+        up.set_string_from_utf16_unchecked(piece);
+        up.post(core_graphics::event::CGEventTapLocation::HID);
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn type_text(_text: &str) -> Result<()> {
+    Err(anyhow!("Typing not supported on this platform"))
+}
+
+/// Post `count` backspace keystrokes.
+#[cfg(target_os = "macos")]
+pub fn press_backspace(count: usize) -> Result<()> {
+    if count == 0 {
+        return Ok(());
+    }
+
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| anyhow!("Failed to create CGEventSource"))?;
+
+    for _ in 0..count {
+        let down = CGEvent::new_keyboard_event(source.clone(), KEY_DELETE, true)
+            .map_err(|_| anyhow!("Failed to create backspace down event"))?;
+        down.post(core_graphics::event::CGEventTapLocation::HID);
+
+        let up = CGEvent::new_keyboard_event(source.clone(), KEY_DELETE, false)
+            .map_err(|_| anyhow!("Failed to create backspace up event"))?;
+        up.post(core_graphics::event::CGEventTapLocation::HID);
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn press_backspace(_count: usize) -> Result<()> {
+    Err(anyhow!("Backspace not supported on this platform"))
+}
+
+/// Work out the smallest edit that turns `typed` into `target`:
+/// how many characters to backspace, and what to type afterwards.
+///
+/// Compares by `char` because each backspace removes one character.
+pub fn reconcile(typed: &str, target: &str) -> (usize, String) {
+    let common = typed
+        .chars()
+        .zip(target.chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    let to_delete = typed.chars().count() - common;
+    let to_type: String = target.chars().skip(common).collect();
+
+    (to_delete, to_type)
+}
+
 /// Check if accessibility permissions are granted (needed for CGEvent)
 #[cfg(target_os = "macos")]
 pub fn check_accessibility() -> bool {
@@ -146,9 +233,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_reconcile_identical_is_noop() {
+        assert_eq!(reconcile("hello", "hello"), (0, String::new()));
+    }
+
+    #[test]
+    fn test_reconcile_pure_append() {
+        assert_eq!(reconcile("hello", "hello world"), (0, " world".to_string()));
+    }
+
+    #[test]
+    fn test_reconcile_corrects_divergent_tail() {
+        // "helo wrld" -> "hello world": common prefix is "hel"
+        let (del, add) = reconcile("helo wrld", "hello world");
+        assert_eq!(del, 6, "should delete 'o wrld'");
+        assert_eq!(add, "lo world");
+    }
+
+    #[test]
+    fn test_reconcile_counts_chars_not_bytes() {
+        // Multi-byte chars must cost one backspace each, not one per byte.
+        let (del, add) = reconcile("héllo", "héy");
+        assert_eq!(del, 3, "delete 'llo'");
+        assert_eq!(add, "y");
+    }
+
+    #[test]
+    fn test_reconcile_from_empty() {
+        assert_eq!(reconcile("", "hello"), (0, "hello".to_string()));
+    }
+
+    #[test]
     fn test_check_accessibility() {
         // Just verify it doesn't crash
         let _trusted = check_accessibility();
+    }
+
+    /// `get_frontmost_app_pid` calls NSWorkspace, which is an AppKit API. Live
+    /// dictation queries it from the audio processing thread, so it must return
+    /// the same answer off the main thread — otherwise the focus guard silently
+    /// fails and every streamed chunk is held back.
+    ///
+    /// Run with: cargo test frontmost_pid_off_main_thread -- --nocapture
+    #[test]
+    fn test_frontmost_pid_off_main_thread() {
+        let on_main = get_frontmost_app_pid();
+        let off_main = std::thread::spawn(get_frontmost_app_pid)
+            .join()
+            .expect("thread panicked");
+
+        println!("frontmost pid: main={:?} background={:?}", on_main, off_main);
+        assert_eq!(
+            on_main, off_main,
+            "NSWorkspace returned a different frontmost pid off the main thread"
+        );
     }
 
     #[test]

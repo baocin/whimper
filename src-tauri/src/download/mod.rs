@@ -1,7 +1,7 @@
-//! Model download with R2 CDN
+//! Model download
 //!
-//! Downloads Parakeet TDT INT8 model files (~662 MB total)
-//! to ~/.whimper/models/parakeet-tdt/
+//! Downloads Nemotron Speech Streaming EN 0.6B INT4 model files (~662 MB total)
+//! to ~/.whimper/models/nemotron-int4/
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
@@ -11,13 +11,14 @@ use tokio::io::AsyncWriteExt;
 
 use crate::state;
 
-const R2_BASE: &str = "https://public.mydatatimeline.com/models/parakeet-tdt-int8";
+// ponytail: pulls straight from HuggingFace. Re-point at the R2 CDN if rate limits bite.
+const R2_BASE: &str =
+    "https://huggingface.co/lokkju/nemotron-speech-streaming-en-0.6b-int4/resolve/main";
 
 const MODEL_FILES: &[(&str, u64)] = &[
-    ("encoder.int8.onnx", 652_000_000), // ~652 MB
-    ("decoder.int8.onnx", 8_000_000),   // ~8 MB
-    ("joiner.int8.onnx", 2_000_000),    // ~2 MB
-    ("tokens.txt", 10_000),             // ~10 KB
+    ("encoder.onnx", 632_200_000),     // ~632 MB
+    ("decoder_joint.onnx", 29_800_000), // ~30 MB
+    ("tokenizer.model", 251_000),      // ~251 KB
 ];
 
 #[derive(Clone, serde::Serialize)]
@@ -164,9 +165,9 @@ mod tests {
 
     #[test]
     fn test_model_files_defined() {
-        assert_eq!(MODEL_FILES.len(), 4);
-        assert_eq!(MODEL_FILES[0].0, "encoder.int8.onnx");
-        assert_eq!(MODEL_FILES[3].0, "tokens.txt");
+        assert_eq!(MODEL_FILES.len(), 3);
+        assert_eq!(MODEL_FILES[0].0, "encoder.onnx");
+        assert_eq!(MODEL_FILES[2].0, "tokenizer.model");
     }
 
     #[test]
