@@ -7,7 +7,8 @@ Seriously got tired of not owning the software that most of my thoughts were str
 ## macOS downloads
 
 Get the app from [GitHub Releases](https://github.com/baocin/whimper/releases/latest).
-Choose `aarch64` for Apple Silicon or `x64` / `x86_64` for Intel. Releases include
+Choose `aarch64` for Apple Silicon (M1 and newer). Intel builds are unavailable
+with the current ONNX Runtime dependency. Releases include
 a disk image and an app archive, plus SHA-256 checksums. The builds are not
 Developer ID signed or notarized; macOS may require approval through System
 Settings → Privacy & Security → Open Anyway.
@@ -33,7 +34,7 @@ All speech processing happens locally via ONNX Runtime. No network calls after t
 
 ## Requirements
 
-- macOS (Apple Silicon or Intel)
+- macOS on Apple Silicon (M1 and newer)
 - Microphone permission
 - Accessibility permission (for synthesized keystrokes via CGEvent)
 
@@ -99,8 +100,8 @@ bun test                          # frontend (vitest)
 cd src-tauri && cargo test        # backend (rust)
 ```
 
-Pushing a `v*` tag builds and tests both macOS architectures, then publishes the
-downloads to GitHub Releases after both builds succeed. Branch pushes and pull
+Pushing a `v*` tag builds and tests the Apple Silicon macOS app, then publishes the
+downloads to GitHub Releases after the build and tests succeed. Branch pushes and pull
 requests build downloadable Actions artifacts without publishing a release.
 
 ## Architecture

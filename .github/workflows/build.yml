@@ -13,15 +13,7 @@ permissions:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15
-            arch: aarch64
-          - runner: macos-15-intel
-            arch: x86_64
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -40,14 +32,14 @@ jobs:
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
       - name: Package downloads
         env:
-          ARCH: ${{ matrix.arch }}
+          ARCH: aarch64
         run: |
           mkdir downloads
           tar -czf "downloads/Whimper_${ARCH}.app.tar.gz" -C src-tauri/target/release/bundle/macos Whimper.app
           cp src-tauri/target/release/bundle/dmg/*.dmg downloads/
       - uses: actions/upload-artifact@v4
         with:
-          name: Whimper-${{ matrix.arch }}
+          name: Whimper-aarch64
           path: downloads/*
           if-no-files-found: error
 
