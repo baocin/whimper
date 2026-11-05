@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, act } from '@testing-library/react';
 import Overlay from '../../src/components/Overlay';
 
 // Mock Tauri APIs
@@ -21,11 +21,17 @@ describe('Overlay', () => {
     expect(screen.getByText('Listening...')).toBeInTheDocument();
   });
 
-  it('calls cancel_recording on ESC key', async () => {
-    const { invoke } = await import('@tauri-apps/api/core');
+  it('shows processing state from the backend', async () => {
+    const { listen } = await import('@tauri-apps/api/event');
     render(<Overlay />);
-    fireEvent.keyDown(window, { key: 'Escape' });
-    expect(invoke).toHaveBeenCalledWith('cancel_recording');
+    act(() => {
+      for (const [event, callback] of vi.mocked(listen).mock.calls) {
+        if (event === 'recording-state') {
+          callback({ event, id: 1, payload: 'processing' });
+        }
+      }
+    });
+    expect(screen.getByText('Processing...')).toBeInTheDocument();
   });
 
   it('has a pulsing mic indicator', () => {

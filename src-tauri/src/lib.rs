@@ -525,11 +525,7 @@ fn handle_hotkey(app_handle: &AppHandle, state: &Arc<AppState>) {
                     String::new()
                 };
 
-                tracing::info!(
-                    "Transcript ({} chars): {:?}",
-                    transcript.len(),
-                    &transcript[..transcript.len().min(120)]
-                );
+                tracing::info!("Transcript ({} chars)", transcript.chars().count());
 
                 // Append transcript to log file (in app data dir to avoid
                 // triggering cargo-tauri dev file watcher)

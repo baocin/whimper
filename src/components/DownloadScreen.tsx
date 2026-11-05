@@ -83,7 +83,7 @@ export default function DownloadScreen({ modelStatus, onStatusChange, healthWarn
       {modelStatus.kind === 'not_downloaded' && (
         <div className="text-center">
           <p className="mb-4 text-gray-300">
-            Parakeet speech model required (~662 MB download)
+            Nemotron streaming speech model required (~662 MB download)
           </p>
           <button
             onClick={startDownload}

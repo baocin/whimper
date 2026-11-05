@@ -20,14 +20,14 @@ describe('DownloadScreen', () => {
 
   it('shows download button when not downloaded', () => {
     const status: ModelStatus = { kind: 'not_downloaded' };
-    render(<DownloadScreen modelStatus={status} onStatusChange={mockOnStatusChange} />);
+    render(<DownloadScreen modelStatus={status} onStatusChange={mockOnStatusChange} healthWarnings={[]} onDismissWarnings={vi.fn()} />);
     expect(screen.getByText('Download Model')).toBeInTheDocument();
-    expect(screen.getByText(/2.5 GB/)).toBeInTheDocument();
+    expect(screen.getByText(/662 MB/)).toBeInTheDocument();
   });
 
   it('shows progress bar when downloading', () => {
     const status: ModelStatus = { kind: 'downloading', progress: 0.5, speed_mbps: 10.2 };
-    render(<DownloadScreen modelStatus={status} onStatusChange={mockOnStatusChange} />);
+    render(<DownloadScreen modelStatus={status} onStatusChange={mockOnStatusChange} healthWarnings={[]} onDismissWarnings={vi.fn()} />);
     expect(screen.getByText('50%')).toBeInTheDocument();
     expect(screen.getByText('10.2 MB/s')).toBeInTheDocument();
     expect(screen.getByText('Cancel')).toBeInTheDocument();
@@ -35,20 +35,20 @@ describe('DownloadScreen', () => {
 
   it('shows loading spinner when model is loading', () => {
     const status: ModelStatus = { kind: 'loading' };
-    render(<DownloadScreen modelStatus={status} onStatusChange={mockOnStatusChange} />);
-    expect(screen.getByText('Loading model on GPU...')).toBeInTheDocument();
+    render(<DownloadScreen modelStatus={status} onStatusChange={mockOnStatusChange} healthWarnings={[]} onDismissWarnings={vi.fn()} />);
+    expect(screen.getByText('Loading model...')).toBeInTheDocument();
   });
 
   it('shows error with retry button', () => {
     const status: ModelStatus = { kind: 'error', message: 'Network error' };
-    render(<DownloadScreen modelStatus={status} onStatusChange={mockOnStatusChange} />);
+    render(<DownloadScreen modelStatus={status} onStatusChange={mockOnStatusChange} healthWarnings={[]} onDismissWarnings={vi.fn()} />);
     expect(screen.getByText('Network error')).toBeInTheDocument();
     expect(screen.getByText('Retry Download')).toBeInTheDocument();
   });
 
   it('calls invoke on download button click', async () => {
     const status: ModelStatus = { kind: 'not_downloaded' };
-    render(<DownloadScreen modelStatus={status} onStatusChange={mockOnStatusChange} />);
+    render(<DownloadScreen modelStatus={status} onStatusChange={mockOnStatusChange} healthWarnings={[]} onDismissWarnings={vi.fn()} />);
     fireEvent.click(screen.getByText('Download Model'));
     expect(mockOnStatusChange).toHaveBeenCalledWith(
       expect.objectContaining({ kind: 'downloading' }),

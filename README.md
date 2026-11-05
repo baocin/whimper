@@ -4,6 +4,18 @@ Local, privacy-first voice-to-text transcription for macOS. An open-source alter
 
 Seriously got tired of not owning the software that most of my thoughts were streaming through.
 
+## macOS downloads
+
+Get the app from [GitHub Releases](https://github.com/baocin/whimper/releases/latest).
+Choose `aarch64` for Apple Silicon or `x64` / `x86_64` for Intel. Releases include
+a disk image and an app archive, plus SHA-256 checksums. The builds are not
+Developer ID signed or notarized; macOS may require approval through System
+Settings → Privacy & Security → Open Anyway.
+
+Completed dictation is appended to
+`~/Library/Application Support/com.whimper.app/log.txt`. This file contains your
+transcribed text and stays on your Mac.
+
 ## How it works
 
 1. **First launch** — downloads the Nemotron Speech Streaming EN 0.6B ASR model, INT4 (~662 MB) to `~/.whimper/models/`
@@ -86,6 +98,10 @@ bun tauri build
 bun test                          # frontend (vitest)
 cd src-tauri && cargo test        # backend (rust)
 ```
+
+Pushing a `v*` tag builds and tests both macOS architectures, then publishes the
+downloads to GitHub Releases after both builds succeed. Branch pushes and pull
+requests build downloadable Actions artifacts without publishing a release.
 
 ## Architecture
 

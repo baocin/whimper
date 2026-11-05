@@ -7,3 +7,8 @@ target/
 vite.config.d.ts
 vite.config.js
 src-tauri/log.txt
+*.log
+*.jsonl
+.env
+.env.*
+!.env.example
